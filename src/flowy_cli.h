@@ -65,6 +65,10 @@ void flowy_json_field_i64(const char *key, int64_t val, bool comma);
 void flowy_json_field_bool(const char *key, bool val, bool comma);
 void flowy_json_field_hex64(const char *key, uint64_t val, bool comma);
 
+/* 64-Byte Univalent GPU Constant/Uniform Buffer Generator (Metal & WGSL) */
+int flowy_emit_gpu_shader(const char *path, const char *struct_name,
+                          int64_t b_enter, int64_t b_exit, uint32_t qshift, bool is_wgsl);
+
 #ifdef __cplusplus
 }
 #endif

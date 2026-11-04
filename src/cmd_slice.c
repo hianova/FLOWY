@@ -42,6 +42,8 @@ static void print_slice_help(void) {
            "    --git-diff               Route git diff on target for incremental migration\n"
            "    --shadow <out.c>         Emit Stage 1 Dual-Track Shadow Tap mirror\n"
            "    --excavate <out.c>       Emit Stage 2 FlowBusinessRoute64 ASM Router skeleton\n"
+           "    --emit-metal <out.metal> Emit 64B Univalent Metal Shading Language buffer header\n"
+           "    --emit-wgsl <out.wgsl>   Emit 64B Univalent WebGPU Shading Language uniform buffer\n"
            "    --restore <in.c>         Validate or restore univalent struct definition\n"
            "    --json                   Deterministic JSON output\n"
            "    -h, --help               Print help information\n");
@@ -151,7 +153,9 @@ static void strip_comments_in_place(char *src) {
         } else if (in_line) {
             if (src[i] == '\n') in_line = false; else src[i] = ' ';
         } else if (in_str) {
-            if (src[i] == '\\' && src[i + 1] != '\0') i++; else if (src[i] == '"') in_str = false;
+            if (src[i] == '\\' && src[i + 1] != '\0') { src[i] = ' '; src[i + 1] = ' '; i++; }
+            else if (src[i] == '"') in_str = false;
+            else if (src[i] != '\n') src[i] = ' ';
         } else {
             if (src[i] == '"') in_str = true;
             else if (src[i] == '/' && src[i + 1] == '*') { src[i] = ' '; src[i + 1] = ' '; i++; in_block = true; }
@@ -436,6 +440,7 @@ static int restore_univalent_struct(const char *in_path, const char *struct_name
 
 int cmd_slice_run(int argc, char **argv, bool json_mode) {
     const char *target_c = NULL, *target_struct = NULL, *shadow_out = NULL, *excavate_out = NULL, *restore_in = NULL, *ast_json = NULL;
+    const char *emit_metal = NULL, *emit_wgsl = NULL;
     bool use_ast = false, use_ir = false, use_git = false, audit_all = false;
     size_t struct_size = 0;
 
@@ -455,6 +460,10 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
             shadow_out = (argv[i][8] == '=') ? argv[i] + 9 : argv[++i];
         else if ((strcmp(argv[i], "--excavate") == 0 && i + 1 < argc) || strncmp(argv[i], "--excavate=", 11) == 0)
             excavate_out = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i];
+        else if ((strcmp(argv[i], "--emit-metal") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-metal=", 13) == 0)
+            emit_metal = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
+        else if ((strcmp(argv[i], "--emit-wgsl") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-wgsl=", 12) == 0)
+            emit_wgsl = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
         else if ((strcmp(argv[i], "--restore") == 0 && i + 1 < argc) || strncmp(argv[i], "--restore=", 10) == 0)
             restore_in = (argv[i][9] == '=') ? argv[i] + 10 : argv[++i];
         else if (argv[i][0] != '-') target_c = argv[i];
@@ -472,6 +481,8 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
     route_llvm_and_git(target_c, ast_json, use_ast, use_ir, use_git, &rep);
     if (shadow_out && emit_shadow_tap(shadow_out, "flow_shadow") != 0) return 1;
     if (excavate_out && emit_excavated_skeleton(excavate_out, "flow_excavated") != 0) return 1;
+    if (emit_metal && flowy_emit_gpu_shader(emit_metal, rep.struct_name, 73728, 57344, 16, false) != 0) return 1;
+    if (emit_wgsl && flowy_emit_gpu_shader(emit_wgsl, rep.struct_name, 73728, 57344, 16, true) != 0) return 1;
 
     if (json_mode) {
         flowy_json_start();

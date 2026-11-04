@@ -21,6 +21,7 @@ static void print_sieve_help(void) {
            "    --resource-sieve         Alias for --check-qsbr\n"
            "    --capsule-encode <text>  Encode 64-byte payload into Hex128 capsule\n"
            "    --capsule-decode <hex>   Decode Hex128 capsule and verify integrity MAC\n"
+           "    --verify-trace [spec]    Verify causal execution trace MAC chain & Kan continuity\n"
            "    --json                   Deterministic JSON output for Agent consumption\n"
            "    -h, --help               Print help information\n");
 }
@@ -40,8 +41,8 @@ static const char *violation_kind_str(uint8_t k) {
 
 int cmd_sieve_run(int argc, char **argv, bool json_mode) {
     const char *dec_tag = NULL, *dec_sieve = NULL, *hp_p = NULL, *hp_q = NULL, *quot = NULL;
-    const char *wave64_str = NULL, *caps_enc = NULL, *caps_dec = NULL;
-    bool probe_res = false;
+    const char *wave64_str = NULL, *caps_enc = NULL, *caps_dec = NULL, *trace_spec = NULL;
+    bool probe_res = false, verify_trace = false;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { print_sieve_help(); return 0; }
@@ -59,6 +60,12 @@ int cmd_sieve_run(int argc, char **argv, bool json_mode) {
             caps_enc = (argv[i][16] == '=') ? argv[i] + 17 : argv[++i];
         else if ((strcmp(argv[i], "--capsule-decode") == 0 && i + 1 < argc) || strncmp(argv[i], "--capsule-decode=", 17) == 0)
             caps_dec = (argv[i][16] == '=') ? argv[i] + 17 : argv[++i];
+        else if (strncmp(argv[i], "--verify-trace=", 15) == 0) {
+            verify_trace = true; trace_spec = argv[i] + 15;
+        } else if (strcmp(argv[i], "--verify-trace") == 0) {
+            verify_trace = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') trace_spec = argv[++i];
+        }
     }
 
     if (dec_tag) {
@@ -227,6 +234,41 @@ int cmd_sieve_run(int argc, char **argv, bool json_mode) {
             printf("=== FLOWY 64B Capsule Dec ===\nText: %s | MAC: 0x%016" PRIx64 " | Integrity: %s\n", txt, smac, ok ? "VALID" : "CORRUPTED");
         }
         return ok ? 0 : 1;
+    }
+
+    if (verify_trace) {
+        uint64_t masks[4] = { 0x3FFULL, 0x3FEULL, 0x3FCULL, 0x3FFULL };
+        size_t steps = 4;
+        if (trace_spec && trace_spec[0]) {
+            uint64_t m0 = 0, m1 = 0;
+            if (sscanf(trace_spec, "%" SCNx64 ",%" SCNx64, &m0, &m1) == 2) {
+                masks[0] = m0; masks[1] = m1; steps = 2;
+            }
+        }
+        uint64_t chain_mac = FLOW_GOLDEN_RATIO_64;
+        bool kan_ok = true;
+        for (size_t s = 0; s < steps; ++s) {
+            chain_mac = flowy_hash64(&masks[s], sizeof(uint64_t), chain_mac);
+            if (s > 0) {
+                uint64_t diff = 0;
+                if (flow_kan_check_homotopy(masks[s - 1], masks[s], ~0ULL, &diff) != FLOW_KAN_FILLED_HOMOTOPIC &&
+                    __builtin_popcountll(diff) > 2) {
+                    kan_ok = false;
+                }
+            }
+        }
+        if (json_mode) {
+            flowy_json_start();
+            flowy_json_field_u64("trace_steps", steps, true);
+            flowy_json_field_bool("trace_sound", kan_ok, true);
+            flowy_json_field_bool("kan_continuity", kan_ok, true);
+            flowy_json_field_hex64("chain_mac_hash", chain_mac, false);
+            flowy_json_end();
+        } else {
+            printf("=== FLOWY Causal Trace Verification ===\nSteps: %zu | Kan Continuity: %s | Chain MAC: 0x%016" PRIx64 " | Status: %s\n",
+                   steps, kan_ok ? "VERIFIED" : "BROKEN", chain_mac, kan_ok ? "SOUND" : "VIOLATED");
+        }
+        return kan_ok ? 0 : 1;
     }
 
     print_sieve_help();

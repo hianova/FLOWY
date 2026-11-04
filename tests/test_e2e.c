@@ -22,7 +22,10 @@ int main(void) {
     _Static_assert(_Alignof(FlowBusinessRoute64) == 64, "FlowBusinessRoute64 align must be 64 bytes");
     FLOW_STATIC_ASSERT_UNIVALENT(FlowBusinessRoute64, FlowCanonicalState64);
     assert(FLOW_VERIFIED_THEOREM_COUNT >= 10U);
-    printf("  [PASS] FlowBusinessRoute64 & FlowCanonicalState64 64B Cache-Line Univalence\n");
+    FlowCanonicalState64 s0 = { .reserveA = 1000, .reserveB = 500 };
+    FlowCanonicalState64 s1 = { .reserveA = 800,  .reserveB = 700 };
+    assert(flow_verify_state_transition(&s0, &s1) == 1);
+    printf("  [PASS] FlowBusinessRoute64, FlowCanonicalState64 64B Univalence & State-Transition Invariant\n");
 
     /* 2. Verify Synthesized QPoly Hysteresis Governor Header (build/tmp_governor.h) */
     FlowGovernorPoly gov;

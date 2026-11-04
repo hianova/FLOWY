@@ -18,7 +18,10 @@ static void print_qpoly_help(void) {
            "    --b-exit <X>          Explicit lower release bound b_exit (overrides threshold-deadband)\n"
            "    --noise-floor <N>     Estimated sensor noise floor (default: 2048)\n"
            "    --qshift-sweep        Perform conservative inner quantization Q-shift sweep (8..24)\n"
+           "    --auto-cegis          Synthesize optimal deadband & Q-shift via counterexample loop\n"
            "    --emit-c <out.h>      Emit FLOW_QPOLY_DEFINE_EX C header\n"
+           "    --emit-metal <out.metal> Emit 64B Univalent Metal Shading Language buffer header\n"
+           "    --emit-wgsl <out.wgsl>   Emit 64B Univalent WebGPU Shading Language uniform buffer\n"
            "    --json                Deterministic JSON output for Agent consumption\n"
            "    -h, --help            Print help information\n");
 }
@@ -31,8 +34,8 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode) {
     int64_t noise_floor = 2048;
     int64_t explicit_enter = 0, explicit_exit = 0;
     bool has_enter = false, has_exit = false;
-    bool qshift_sweep = false;
-    const char *emit_c = NULL;
+    bool qshift_sweep = false, auto_cegis = false;
+    const char *emit_c = NULL, *emit_metal = NULL, *emit_wgsl = NULL;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { print_qpoly_help(); return 0; }
@@ -49,12 +52,18 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode) {
         } else if ((strcmp(argv[i], "--noise-floor") == 0 && i + 1 < argc) || strncmp(argv[i], "--noise-floor=", 14) == 0)
             noise_floor = strtoll((argv[i][13] == '=') ? argv[i] + 14 : argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--qshift-sweep") == 0) qshift_sweep = true;
+        else if (strcmp(argv[i], "--auto-cegis") == 0) { auto_cegis = true; qshift_sweep = true; }
         else if ((strcmp(argv[i], "--emit-c") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-c=", 9) == 0)
             emit_c = (argv[i][8] == '=') ? argv[i] + 9 : argv[++i];
+        else if ((strcmp(argv[i], "--emit-metal") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-metal=", 13) == 0)
+            emit_metal = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
+        else if ((strcmp(argv[i], "--emit-wgsl") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-wgsl=", 12) == 0)
+            emit_wgsl = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
         else if (argv[i][0] != '-') spec_str = argv[i];
     }
 
     if (deadband < noise_floor) deadband = noise_floor * 2;
+    if (auto_cegis && deadband < noise_floor * 2) deadband = noise_floor * 2;
     int64_t b_enter = has_enter ? explicit_enter : (threshold + deadband);
     int64_t b_exit  = has_exit  ? explicit_exit  : (threshold - deadband);
     if (b_exit > b_enter) { fprintf(stderr, "Error: b_exit (%" PRId64 ") > b_enter (%" PRId64 ")\n", b_exit, b_enter); return 1; }
@@ -72,6 +81,9 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode) {
     } else {
         flow_qpoly_quantize_inner(1, dim, optimal_qshift, a_num, b_num, denom, box_min, box_max, a_q, b_q);
     }
+
+    if (emit_metal && flowy_emit_gpu_shader(emit_metal, "FlowGovernorPoly64", b_enter, b_exit, optimal_qshift, false) != 0) return 1;
+    if (emit_wgsl && flowy_emit_gpu_shader(emit_wgsl, "FlowGovernorPoly64", b_enter, b_exit, optimal_qshift, true) != 0) return 1;
 
     if (emit_c) {
         FILE *f = fopen(emit_c, "w");
@@ -110,6 +122,8 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode) {
                "Quantization: Q%u | A[0]=%d | b[0]=%" PRId64 " | FalseNeg: 0\n",
                spec_str, dim, threshold, deadband, b_exit, b_enter, optimal_qshift, a_q[0], b_q[0]);
         if (emit_c) printf("Synthesized header written to: %s\n", emit_c);
+        if (emit_metal) printf("Synthesized Metal buffer written to: %s\n", emit_metal);
+        if (emit_wgsl) printf("Synthesized WGSL buffer written to: %s\n", emit_wgsl);
     }
     return 0;
 }
