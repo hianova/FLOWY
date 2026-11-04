@@ -524,6 +524,8 @@ static void route_metal_air(const char *target_c, SliceAuditReport *rep) {
             "#define __METAL_VERSION__ 310\n"
             "#define constant const\n#define device\n#define thread\n"
             "#define vertex\n#define fragment\n#define kernel\n"
+            "#define inline inline __attribute__((always_inline))\n"
+            "#define constexpr constexpr __attribute__((always_inline))\n"
             "typedef uint32_t uint;\ntypedef uint16_t ushort;\ntypedef uint8_t uchar;\ntypedef uint64_t ulong;\n"
             "struct float2 { float x, y; constexpr float2(float v=0):x(v),y(v){} constexpr float2(float a,float b):x(a),y(b){} };\n"
             "struct float3 { float x, y, z; constexpr float3(float v=0):x(v),y(v),z(v){} constexpr float3(float a,float b,float c):x(a),y(b),z(c){} constexpr float3(float2 a,float c):x(a.x),y(a.y),z(c){} constexpr float3(float a,float2 b):x(a),y(b.x),z(b.y){} constexpr float3(const float *p):x(p[0]),y(p[1]),z(p[2]){} };\n"
@@ -549,14 +551,14 @@ static void route_metal_air(const char *target_c, SliceAuditReport *rep) {
             "inline float2 operator-(float2 a){return float2(-a.x,-a.y);}\n"
             "inline float3 operator-(float3 a){return float3(-a.x,-a.y,-a.z);}\n"
             "inline float4 operator-(float4 a){return float4(-a.x,-a.y,-a.z,-a.w);}\n"
-            "#define FLOW_V_ASSIGN(op) \\\n"
-            "inline float2& operator op(float2& a,float2 b){a=a op b;return a;} \\\n"
-            "inline float2& operator op(float2& a,float b){a=a op b;return a;} \\\n"
-            "inline float3& operator op(float3& a,float3 b){a=a op b;return a;} \\\n"
-            "inline float3& operator op(float3& a,float b){a=a op b;return a;} \\\n"
-            "inline float4& operator op(float4& a,float4 b){a=a op b;return a;} \\\n"
-            "inline float4& operator op(float4& a,float b){a=a op b;return a;}\n"
-            "FLOW_V_ASSIGN(+=) FLOW_V_ASSIGN(-=) FLOW_V_ASSIGN(*=) FLOW_V_ASSIGN(/=)\n", sh);
+            "#define FLOW_V_ASSIGN(op,bop) \\\n"
+            "inline float2& operator op(float2& a,float2 b){a=a bop b;return a;} \\\n"
+            "inline float2& operator op(float2& a,float b){a=a bop b;return a;} \\\n"
+            "inline float3& operator op(float3& a,float3 b){a=a bop b;return a;} \\\n"
+            "inline float3& operator op(float3& a,float b){a=a bop b;return a;} \\\n"
+            "inline float4& operator op(float4& a,float4 b){a=a bop b;return a;} \\\n"
+            "inline float4& operator op(float4& a,float b){a=a bop b;return a;}\n"
+            "FLOW_V_ASSIGN(+=,+) FLOW_V_ASSIGN(-=,-) FLOW_V_ASSIGN(*=,*) FLOW_V_ASSIGN(/=,/)\n", sh);
         fputs(
             "using std::sin; using std::cos; using std::sqrt; using std::exp; using std::pow; using std::atan2; using std::floor; using std::ceil; using std::abs;\n"
             "template<typename T> inline T min(T a,T b){return a<b?a:b;}\n"
@@ -686,7 +688,7 @@ static void route_metal_air(const char *target_c, SliceAuditReport *rep) {
     if (tu) fclose(tu);
 
     snprintf(cmd, sizeof(cmd),
-             "cc -x c++ -std=c++17 -O2 -include /tmp/flowy_msl_shim.h "
+             "cc -x c++ -std=c++17 -O2 -mllvm -inline-threshold=10000 -include /tmp/flowy_msl_shim.h "
              "-S -emit-llvm -I./include -I\"%s\" -I\"%s/../include\" /tmp/flowy_msl_tu.cpp -o - 2>/dev/null",
              tdir, tdir);
     fp = popen(cmd, "r");
