@@ -19,11 +19,13 @@ typedef struct {
     size_t structs_total, structs_univalent_64b;
     bool is_univalent;
     size_t l1_budget_bytes;
-    bool llvm_ast_routed, llvm_ir_routed, git_diff_routed, mca_routed;
+    bool llvm_ast_routed, llvm_ir_routed, git_diff_routed, mca_routed, metal_air_routed;
     size_t ast_records, ast_fields, ast_funcs, ast_calls;
     size_t ir_float_ops, ir_inline_asm, ir_select_ops, ir_heap_calls, ir_align64_ops;
     size_t mca_instructions, mca_branches, mca_est_cycles;
     char mca_backend[32];
+    size_t air_instructions, air_alu_fops, air_transcendentals, air_branches, air_stack_spills, air_est_vgprs;
+    char air_backend[32];
     size_t git_added_lines, git_deleted_lines;
 
     bool audit_all;
@@ -42,6 +44,7 @@ static void print_slice_help(void) {
            "    --ast-json <file>        Ingest external Clang AST JSON dump via interface\n"
            "    --llvm-ir                Route clang -S -emit-llvm -O2 (audit 0-float/ASM/align64)\n"
            "    --mca                    Route clang -S -O2 + llvm-mca / static instruction & cycle audit\n"
+           "    --metal-air              Route xcrun metal / MSL-LLVM IR static GPU shader & VGPR audit\n"
            "    --git-diff               Route git diff on target for incremental migration\n"
            "    --shadow <out.c>         Emit Stage 1 Dual-Track Shadow Tap mirror\n"
            "    --excavate <out.c>       Emit Stage 2 FlowBusinessRoute64 ASM Router skeleton\n"
@@ -306,7 +309,10 @@ static int parse_c_file(const char *filepath, const char *target_struct, size_t 
             snprintf(st->name, sizeof(st->name), "%s", final_name[0] ? final_name : "anonymous");
             st->total_size = cur_offset; st->align = has_align64 ? 64 : max_align;
             st->padding_bytes = (total_padding > 0) ? total_padding : ((64 - (cur_offset % 64)) % 64);
-            st->has_align64 = has_align64; st->is_univalent = (st->total_size == 64 && st->align == 64);
+            st->has_align64 = has_align64;
+            st->is_univalent = ((st->total_size == 64 && st->align == 64) ||
+                                (st->total_size > 64 && (st->total_size % 64 == 0) &&
+                                 st->align == 64 && st->padding_bytes == 0));
         }
         p = after_semi ? (after_semi + 1) : (brace_close + 1);
     }
@@ -355,7 +361,7 @@ static void route_llvm_and_git(const char *target_c, const char *ast_json, bool 
         FILE *fp = ast_json ? fopen(ast_json, "r") : NULL;
         if (!ast_json) {
             snprintf(cmd, sizeof(cmd), "cc -Xclang -ast-dump -fsyntax-only -fno-color-diagnostics "
-                     "-I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build \"%s\" 2>/dev/null",
+                     "-I./include -I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build -I../Ricardian/build \"%s\" 2>/dev/null",
                      tdir, tdir, tdir, target_c);
             fp = popen(cmd, "r");
         }
@@ -371,8 +377,8 @@ static void route_llvm_and_git(const char *target_c, const char *ast_json, bool 
     }
     if (do_ir) {
         rep->llvm_ir_routed = true;
-        snprintf(cmd, sizeof(cmd), "cc -x c -std=c11 -O2 -S -emit-llvm "
-                 "-I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build \"%s\" -o - 2>/dev/null",
+        snprintf(cmd, sizeof(cmd), "cc -x c -std=c17 -O2 -S -emit-llvm "
+                 "-I./include -I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build -I../Ricardian/build \"%s\" -o - 2>/dev/null",
                  tdir, tdir, tdir, target_c);
         FILE *fp = popen(cmd, "r");
         if (fp) {
@@ -390,8 +396,8 @@ static void route_llvm_and_git(const char *target_c, const char *ast_json, bool 
     if (do_mca) {
         rep->mca_routed = true;
         snprintf(rep->mca_backend, sizeof(rep->mca_backend), "clang-asm-audit");
-        snprintf(cmd, sizeof(cmd), "cc -x c -std=c11 -O2 -S "
-                 "-I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build \"%s\" -o - 2>/dev/null",
+        snprintf(cmd, sizeof(cmd), "cc -x c -std=c17 -O2 -S "
+                 "-I./include -I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build -I../Ricardian/build \"%s\" -o - 2>/dev/null",
                  tdir, tdir, tdir, target_c);
         FILE *fp = popen(cmd, "r");
         if (fp) {
@@ -441,6 +447,255 @@ static void route_llvm_and_git(const char *target_c, const char *ast_json, bool 
             pclose(fp);
         }
     }
+}
+
+static void scan_air_ir_stream(FILE *fp, SliceAuditReport *rep, size_t *out_lines) {
+    char line[1024];
+    bool in_func = false;
+    size_t cur_func_ssa = 0, max_func_ssa = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        (*out_lines)++;
+        if (strncmp(line, "define ", 7) == 0) {
+            in_func = true;
+            cur_func_ssa = 0;
+            continue;
+        }
+        if (in_func && line[0] == '}') {
+            if (cur_func_ssa > max_func_ssa) max_func_ssa = cur_func_ssa;
+            in_func = false;
+            continue;
+        }
+        if (!in_func) continue;
+        const char *s = line;
+        while (*s && isspace((unsigned char)*s)) s++;
+        if (!*s || *s == ';' || strchr(s, ':')) continue;
+        rep->air_instructions++;
+        if (*s == '%') cur_func_ssa++;
+        if (strstr(s, " fadd ") || strstr(s, " fsub ") || strstr(s, " fmul ") ||
+            strstr(s, " fdiv ") || strstr(s, " fneg ") || strstr(s, " fcmp ") ||
+            strstr(s, "llvm.fmuladd") || strstr(s, "llvm.fma")) {
+            rep->air_alu_fops++;
+        }
+        if (strstr(s, "sin") || strstr(s, "cos") || strstr(s, "sqrt") ||
+            strstr(s, "exp") || strstr(s, "pow") || strstr(s, "atan2")) {
+            rep->air_transcendentals++;
+        }
+        if (strncmp(s, "br i1 ", 6) == 0 || strncmp(s, "switch ", 7) == 0) {
+            rep->air_branches++;
+        }
+        if (strstr(s, " = alloca ")) {
+            rep->air_stack_spills++;
+        }
+    }
+    if (max_func_ssa > 0) {
+        size_t est = 12 + (max_func_ssa / 14);
+        rep->air_est_vgprs = (est > 128) ? 128 : est;
+    }
+}
+
+static void route_metal_air(const char *target_c, SliceAuditReport *rep) {
+    char cmd[1024], tdir[256] = ".";
+    const char *slash = target_c ? strrchr(target_c, '/') : NULL;
+    if (slash && (size_t)(slash - target_c) < sizeof(tdir)) {
+        memcpy(tdir, target_c, (size_t)(slash - target_c));
+        tdir[slash - target_c] = '\0';
+    }
+    rep->metal_air_routed = true;
+    snprintf(rep->air_backend, sizeof(rep->air_backend), "xcrun-metal-air");
+    snprintf(cmd, sizeof(cmd),
+             "xcrun -sdk macosx metal -O2 -S -emit-llvm -I./include -I\"%s\" -I\"%s/../include\" \"%s\" -o - 2>/dev/null",
+             tdir, tdir, target_c);
+    size_t ir_lines = 0;
+    FILE *fp = popen(cmd, "r");
+    if (fp) {
+        scan_air_ir_stream(fp, rep, &ir_lines);
+        pclose(fp);
+    }
+    if (ir_lines > 0 && rep->air_instructions > 0) return;
+
+    /* Fallback when MetalToolchain component is not downloaded: lower MSL via clang++ -O2 -S -emit-llvm */
+    snprintf(rep->air_backend, sizeof(rep->air_backend), "apple-msl-llvm-ir");
+    FILE *sh = fopen("/tmp/flowy_msl_shim.h", "w");
+    if (sh) {
+        fputs(
+            "#undef __METAL_VERSION__\n"
+            "#define FLOWY_MSL_SHIM 1\n"
+            "#include <cmath>\n#include <cstdint>\n#include <algorithm>\n"
+            "#define __METAL_VERSION__ 310\n"
+            "#define constant const\n#define device\n#define thread\n"
+            "#define vertex\n#define fragment\n#define kernel\n"
+            "typedef uint32_t uint;\ntypedef uint16_t ushort;\ntypedef uint8_t uchar;\ntypedef uint64_t ulong;\n"
+            "struct float2 { float x, y; constexpr float2(float v=0):x(v),y(v){} constexpr float2(float a,float b):x(a),y(b){} };\n"
+            "struct float3 { float x, y, z; constexpr float3(float v=0):x(v),y(v),z(v){} constexpr float3(float a,float b,float c):x(a),y(b),z(c){} constexpr float3(float2 a,float c):x(a.x),y(a.y),z(c){} constexpr float3(float a,float2 b):x(a),y(b.x),z(b.y){} constexpr float3(const float *p):x(p[0]),y(p[1]),z(p[2]){} };\n"
+            "struct float4 { float x, y, z, w; constexpr float4(float v=0):x(v),y(v),z(v),w(v){} constexpr float4(float a,float b,float c,float d):x(a),y(b),z(c),w(d){} constexpr float4(float2 a,float c,float d):x(a.x),y(a.y),z(c),w(d){} constexpr float4(float2 a,float2 b):x(a.x),y(a.y),z(b.x),w(b.y){} constexpr float4(float3 a,float d):x(a.x),y(a.y),z(a.z),w(d){} constexpr float4(float a,float3 b):x(a),y(b.x),z(b.y),w(b.z){} constexpr float4(const float *p):x(p[0]),y(p[1]),z(p[2]),w(p[3]){} };\n"
+            "struct uint2 { uint x, y; constexpr uint2(uint v=0):x(v),y(v){} constexpr uint2(uint a,uint b):x(a),y(b){} };\n"
+            "struct uint3 { uint x, y, z; constexpr uint3(uint v=0):x(v),y(v),z(v){} constexpr uint3(uint a,uint b,uint c):x(a),y(b),z(c){} };\n"
+            "struct uint4 { uint x, y, z, w; constexpr uint4(uint v=0):x(v),y(v),z(v),w(v){} constexpr uint4(uint a,uint b,uint c,uint d):x(a),y(b),z(c),w(d){} };\n"
+            "struct int2 { int x, y; constexpr int2(int v=0):x(v),y(v){} constexpr int2(int a,int b):x(a),y(b){} };\n"
+            "struct int3 { int x, y, z; constexpr int3(int v=0):x(v),y(v),z(v){} constexpr int3(int a,int b,int c):x(a),y(b),z(c){} };\n"
+            "struct int4 { int x, y, z, w; constexpr int4(int v=0):x(v),y(v),z(v),w(v){} constexpr int4(int a,int b,int c,int d):x(a),y(b),z(c),w(d){} };\n"
+            "#define FLOW_V_OP(op) \\\n"
+            "inline float2 operator op(float2 a,float2 b){return float2(a.x op b.x,a.y op b.y);} \\\n"
+            "inline float2 operator op(float2 a,float b){return float2(a.x op b,a.y op b);} \\\n"
+            "inline float2 operator op(float a,float2 b){return float2(a op b.x,a op b.y);} \\\n"
+            "inline float3 operator op(float3 a,float3 b){return float3(a.x op b.x,a.y op b.y,a.z op b.z);} \\\n"
+            "inline float3 operator op(float3 a,float b){return float3(a.x op b,a.y op b,a.z op b);} \\\n"
+            "inline float3 operator op(float a,float3 b){return float3(a op b.x,a op b.y,a op b.z);} \\\n"
+            "inline float4 operator op(float4 a,float4 b){return float4(a.x op b.x,a.y op b.y,a.z op b.z,a.w op b.w);} \\\n"
+            "inline float4 operator op(float4 a,float b){return float4(a.x op b,a.y op b,a.z op b,a.w op b);} \\\n"
+            "inline float4 operator op(float a,float4 b){return float4(a op b.x,a op b.y,a op b.z,a op b.w);}\n"
+            "FLOW_V_OP(+) FLOW_V_OP(-) FLOW_V_OP(*) FLOW_V_OP(/)\n", sh);
+        fputs(
+            "inline float2 operator-(float2 a){return float2(-a.x,-a.y);}\n"
+            "inline float3 operator-(float3 a){return float3(-a.x,-a.y,-a.z);}\n"
+            "inline float4 operator-(float4 a){return float4(-a.x,-a.y,-a.z,-a.w);}\n"
+            "#define FLOW_V_ASSIGN(op) \\\n"
+            "inline float2& operator op(float2& a,float2 b){a=a op b;return a;} \\\n"
+            "inline float2& operator op(float2& a,float b){a=a op b;return a;} \\\n"
+            "inline float3& operator op(float3& a,float3 b){a=a op b;return a;} \\\n"
+            "inline float3& operator op(float3& a,float b){a=a op b;return a;} \\\n"
+            "inline float4& operator op(float4& a,float4 b){a=a op b;return a;} \\\n"
+            "inline float4& operator op(float4& a,float b){a=a op b;return a;}\n"
+            "FLOW_V_ASSIGN(+=) FLOW_V_ASSIGN(-=) FLOW_V_ASSIGN(*=) FLOW_V_ASSIGN(/=)\n", sh);
+        fputs(
+            "using std::sin; using std::cos; using std::sqrt; using std::exp; using std::pow; using std::atan2; using std::floor; using std::ceil; using std::abs;\n"
+            "template<typename T> inline T min(T a,T b){return a<b?a:b;}\n"
+            "template<typename T> inline T max(T a,T b){return a>b?a:b;}\n"
+            "inline float2 min(float2 a,float2 b){return float2(min(a.x,b.x),min(a.y,b.y));}\n"
+            "inline float2 min(float2 a,float b){return float2(min(a.x,b),min(a.y,b));}\n"
+            "inline float2 min(float a,float2 b){return float2(min(a,b.x),min(a,b.y));}\n"
+            "inline float2 max(float2 a,float2 b){return float2(max(a.x,b.x),max(a.y,b.y));}\n"
+            "inline float2 max(float2 a,float b){return float2(max(a.x,b),max(a.y,b));}\n"
+            "inline float2 max(float a,float2 b){return float2(max(a,b.x),max(a,b.y));}\n"
+            "inline float3 min(float3 a,float3 b){return float3(min(a.x,b.x),min(a.y,b.y),min(a.z,b.z));}\n"
+            "inline float3 min(float3 a,float b){return float3(min(a.x,b),min(a.y,b),min(a.z,b));}\n"
+            "inline float3 min(float a,float3 b){return float3(min(a,b.x),min(a,b.y),min(a,b.z));}\n"
+            "inline float3 max(float3 a,float3 b){return float3(max(a.x,b.x),max(a.y,b.y),max(a.z,b.z));}\n"
+            "inline float3 max(float3 a,float b){return float3(max(a.x,b),max(a.y,b),max(a.z,b));}\n"
+            "inline float3 max(float a,float3 b){return float3(max(a,b.x),max(a,b.y),max(a,b.z));}\n"
+            "inline float4 min(float4 a,float4 b){return float4(min(a.x,b.x),min(a.y,b.y),min(a.z,b.z),min(a.w,b.w));}\n"
+            "inline float4 min(float4 a,float b){return float4(min(a.x,b),min(a.y,b),min(a.z,b),min(a.w,b));}\n"
+            "inline float4 min(float a,float4 b){return float4(min(a,b.x),min(a,b.y),min(a,b.z),min(a,b.w));}\n"
+            "inline float4 max(float4 a,float4 b){return float4(max(a.x,b.x),max(a.y,b.y),max(a.z,b.z),max(a.w,b.w));}\n"
+            "inline float4 max(float4 a,float b){return float4(max(a.x,b),max(a.y,b),max(a.z,b),max(a.w,b));}\n"
+            "inline float4 max(float a,float4 b){return float4(max(a,b.x),max(a,b.y),max(a,b.z),max(a,b.w));}\n", sh);
+        fputs(
+            "inline float clamp(float x,float l,float h){return min(max(x,l),h);}\n"
+            "inline float2 clamp(float2 x,float2 l,float2 h){return float2(clamp(x.x,l.x,h.x),clamp(x.y,l.y,h.y));}\n"
+            "inline float2 clamp(float2 x,float l,float h){return float2(clamp(x.x,l,h),clamp(x.y,l,h));}\n"
+            "inline float3 clamp(float3 x,float3 l,float3 h){return float3(clamp(x.x,l.x,h.x),clamp(x.y,l.y,h.y),clamp(x.z,l.z,h.z));}\n"
+            "inline float3 clamp(float3 x,float l,float h){return float3(clamp(x.x,l,h),clamp(x.y,l,h),clamp(x.z,l,h));}\n"
+            "inline float4 clamp(float4 x,float4 l,float4 h){return float4(clamp(x.x,l.x,h.x),clamp(x.y,l.y,h.y),clamp(x.z,l.z,h.z),clamp(x.w,l.w,h.w));}\n"
+            "inline float4 clamp(float4 x,float l,float h){return float4(clamp(x.x,l,h),clamp(x.y,l,h),clamp(x.z,l,h),clamp(x.w,l,h));}\n"
+            "inline float mix(float a,float b,float t){return a+(b-a)*t;}\n"
+            "inline float2 mix(float2 a,float2 b,float2 t){return float2(mix(a.x,b.x,t.x),mix(a.y,b.y,t.y));}\n"
+            "inline float2 mix(float2 a,float2 b,float t){return a+(b-a)*t;}\n"
+            "inline float3 mix(float3 a,float3 b,float3 t){return float3(mix(a.x,b.x,t.x),mix(a.y,b.y,t.y),mix(a.z,b.z,t.z));}\n"
+            "inline float3 mix(float3 a,float3 b,float t){return a+(b-a)*t;}\n"
+            "inline float4 mix(float4 a,float4 b,float4 t){return float4(mix(a.x,b.x,t.x),mix(a.y,b.y,t.y),mix(a.z,b.z,t.z),mix(a.w,b.w,t.w));}\n"
+            "inline float4 mix(float4 a,float4 b,float t){return a+(b-a)*t;}\n"
+            "inline float step(float e,float x){return x<e?0.0f:1.0f;}\n"
+            "inline float2 step(float2 e,float2 x){return float2(step(e.x,x.x),step(e.y,x.y));}\n"
+            "inline float2 step(float e,float2 x){return float2(step(e,x.x),step(e,x.y));}\n"
+            "inline float3 step(float3 e,float3 x){return float3(step(e.x,x.x),step(e.y,x.y),step(e.z,x.z));}\n"
+            "inline float3 step(float e,float3 x){return float3(step(e,x.x),step(e,x.y),step(e,x.z));}\n"
+            "inline float4 step(float4 e,float4 x){return float4(step(e.x,x.x),step(e.y,x.y),step(e.z,x.z),step(e.w,x.w));}\n"
+            "inline float4 step(float e,float4 x){return float4(step(e,x.x),step(e,x.y),step(e,x.z),step(e,x.w));}\n"
+            "inline float smoothstep(float e0,float e1,float x){float t=clamp((x-e0)/(e1-e0),0.0f,1.0f);return t*t*(3.0f-2.0f*t);}\n"
+            "inline float2 smoothstep(float e0,float e1,float2 x){return float2(smoothstep(e0,e1,x.x),smoothstep(e0,e1,x.y));}\n"
+            "inline float3 smoothstep(float e0,float e1,float3 x){return float3(smoothstep(e0,e1,x.x),smoothstep(e0,e1,x.y),smoothstep(e0,e1,x.z));}\n"
+            "inline float4 smoothstep(float e0,float e1,float4 x){return float4(smoothstep(e0,e1,x.x),smoothstep(e0,e1,x.y),smoothstep(e0,e1,x.z),smoothstep(e0,e1,x.w));}\n", sh);
+        fputs(
+            "inline float fract(float x){return x-std::floor(x);}\n"
+            "inline float2 fract(float2 a){return float2(fract(a.x),fract(a.y));}\n"
+            "inline float3 fract(float3 a){return float3(fract(a.x),fract(a.y),fract(a.z));}\n"
+            "inline float4 fract(float4 a){return float4(fract(a.x),fract(a.y),fract(a.z),fract(a.w));}\n"
+            "inline float2 abs(float2 a){return float2(std::abs(a.x),std::abs(a.y));}\n"
+            "inline float3 abs(float3 a){return float3(std::abs(a.x),std::abs(a.y),std::abs(a.z));}\n"
+            "inline float4 abs(float4 a){return float4(std::abs(a.x),std::abs(a.y),std::abs(a.z),std::abs(a.w));}\n"
+            "inline float2 floor(float2 a){return float2(std::floor(a.x),std::floor(a.y));}\n"
+            "inline float3 floor(float3 a){return float3(std::floor(a.x),std::floor(a.y),std::floor(a.z));}\n"
+            "inline float4 floor(float4 a){return float4(std::floor(a.x),std::floor(a.y),std::floor(a.z),std::floor(a.w));}\n"
+            "inline float2 ceil(float2 a){return float2(std::ceil(a.x),std::ceil(a.y));}\n"
+            "inline float3 ceil(float3 a){return float3(std::ceil(a.x),std::ceil(a.y),std::ceil(a.z));}\n"
+            "inline float4 ceil(float4 a){return float4(std::ceil(a.x),std::ceil(a.y),std::ceil(a.z),std::ceil(a.w));}\n"
+            "inline float2 exp(float2 a){return float2(std::exp(a.x),std::exp(a.y));}\n"
+            "inline float3 exp(float3 a){return float3(std::exp(a.x),std::exp(a.y),std::exp(a.z));}\n"
+            "inline float4 exp(float4 a){return float4(std::exp(a.x),std::exp(a.y),std::exp(a.z),std::exp(a.w));}\n"
+            "inline float2 pow(float2 a,float2 b){return float2(std::pow(a.x,b.x),std::pow(a.y,b.y));}\n"
+            "inline float2 pow(float2 a,float b){return float2(std::pow(a.x,b),std::pow(a.y,b));}\n"
+            "inline float3 pow(float3 a,float3 b){return float3(std::pow(a.x,b.x),std::pow(a.y,b.y),std::pow(a.z,b.z));}\n"
+            "inline float3 pow(float3 a,float b){return float3(std::pow(a.x,b),std::pow(a.y,b),std::pow(a.z,b));}\n"
+            "inline float4 pow(float4 a,float4 b){return float4(std::pow(a.x,b.x),std::pow(a.y,b.y),std::pow(a.z,b.z),std::pow(a.w,b.w));}\n"
+            "inline float4 pow(float4 a,float b){return float4(std::pow(a.x,b),std::pow(a.y,b),std::pow(a.z,b),std::pow(a.w,b));}\n", sh);
+        fputs(
+            "inline float2 sin(float2 a){return float2(std::sin(a.x),std::sin(a.y));}\n"
+            "inline float3 sin(float3 a){return float3(std::sin(a.x),std::sin(a.y),std::sin(a.z));}\n"
+            "inline float4 sin(float4 a){return float4(std::sin(a.x),std::sin(a.y),std::sin(a.z),std::sin(a.w));}\n"
+            "inline float2 cos(float2 a){return float2(std::cos(a.x),std::cos(a.y));}\n"
+            "inline float3 cos(float3 a){return float3(std::cos(a.x),std::cos(a.y),std::cos(a.z));}\n"
+            "inline float4 cos(float4 a){return float4(std::cos(a.x),std::cos(a.y),std::cos(a.z),std::cos(a.w));}\n"
+            "inline float2 sqrt(float2 a){return float2(std::sqrt(a.x),std::sqrt(a.y));}\n"
+            "inline float3 sqrt(float3 a){return float3(std::sqrt(a.x),std::sqrt(a.y),std::sqrt(a.z));}\n"
+            "inline float4 sqrt(float4 a){return float4(std::sqrt(a.x),std::sqrt(a.y),std::sqrt(a.z),std::sqrt(a.w));}\n"
+            "inline float2 sign(float2 a){return float2(a.x>0?1.f:(a.x<0?-1.f:0.f),a.y>0?1.f:(a.y<0?-1.f:0.f));}\n"
+            "inline float3 sign(float3 a){return float3(a.x>0?1.f:(a.x<0?-1.f:0.f),a.y>0?1.f:(a.y<0?-1.f:0.f),a.z>0?1.f:(a.z<0?-1.f:0.f));}\n"
+            "inline float4 sign(float4 a){return float4(a.x>0?1.f:(a.x<0?-1.f:0.f),a.y>0?1.f:(a.y<0?-1.f:0.f),a.z>0?1.f:(a.z<0?-1.f:0.f),a.w>0?1.f:(a.w<0?-1.f:0.f));}\n"
+            "inline float dot(float2 a,float2 b){return a.x*b.x+a.y*b.y;}\n"
+            "inline float dot(float3 a,float3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}\n"
+            "inline float dot(float4 a,float4 b){return a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w;}\n"
+            "inline float length(float2 a){return std::sqrt(dot(a,a));}\n"
+            "inline float length(float3 a){return std::sqrt(dot(a,a));}\n"
+            "inline float length(float4 a){return std::sqrt(dot(a,a));}\n"
+            "inline float distance(float2 a,float2 b){return length(a-b);}\n"
+            "inline float distance(float3 a,float3 b){return length(a-b);}\n"
+            "inline float distance(float4 a,float4 b){return length(a-b);}\n"
+            "inline float2 normalize(float2 a){return a*(1.0f/max(length(a),1e-12f));}\n"
+            "inline float3 normalize(float3 a){return a*(1.0f/max(length(a),1e-12f));}\n"
+            "inline float4 normalize(float4 a){return a*(1.0f/max(length(a),1e-12f));}\n"
+            "inline float2 reflect(float2 i,float2 n){return i-2.0f*dot(n,i)*n;}\n"
+            "inline float3 reflect(float3 i,float3 n){return i-2.0f*dot(n,i)*n;}\n"
+            "inline float4 reflect(float4 i,float4 n){return i-2.0f*dot(n,i)*n;}\n"
+            "inline float3 cross(float3 a,float3 b){return float3(a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x);}\n"
+            "inline float3 refract(float3 i,float3 n,float eta){float d=dot(n,i),k=1.0f-eta*eta*(1.0f-d*d);return k<0.0f?float3(0.0f):(eta*i-(eta*d+std::sqrt(k))*n);}\n", sh);
+        fclose(sh);
+    }
+    FILE *src = fopen(target_c, "r");
+    FILE *tu  = fopen("/tmp/flowy_msl_tu.cpp", "w");
+    if (src && tu) {
+        char sline[1024];
+        while (fgets(sline, sizeof(sline), src)) {
+            if (strstr(sline, "<metal_stdlib>") || strstr(sline, "using namespace metal")) continue;
+            /* Strip [[...]] MSL attribute annotations while preserving array indexing */
+            char clean[1024];
+            size_t ci = 0;
+            for (size_t i = 0; sline[i] && ci + 1 < sizeof(clean);) {
+                if (sline[i] == '[' && sline[i + 1] == '[') {
+                    i += 2;
+                    while (sline[i] && !(sline[i] == ']' && sline[i + 1] == ']')) i++;
+                    if (sline[i] == ']') i += 2;
+                } else {
+                    clean[ci++] = sline[i++];
+                }
+            }
+            clean[ci] = '\0';
+            fputs(clean, tu);
+        }
+    }
+    if (src) fclose(src);
+    if (tu) fclose(tu);
+
+    snprintf(cmd, sizeof(cmd),
+             "cc -x c++ -std=c++17 -O2 -include /tmp/flowy_msl_shim.h "
+             "-S -emit-llvm -I./include -I\"%s\" -I\"%s/../include\" /tmp/flowy_msl_tu.cpp -o - 2>/dev/null",
+             tdir, tdir);
+    fp = popen(cmd, "r");
+    if (fp) {
+        scan_air_ir_stream(fp, rep, &ir_lines);
+        pclose(fp);
+    }
+    remove("/tmp/flowy_msl_shim.h");
+    remove("/tmp/flowy_msl_tu.cpp");
 }
 
 static int emit_shadow_tap(const char *path, const char *name) {
@@ -499,7 +754,7 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
     const char *emit_metal = NULL, *emit_wgsl = NULL;
     const char *emit_ffi[8] = {0};
     size_t emit_ffi_cnt = 0;
-    bool use_ast = false, use_ir = false, use_git = false, use_mca = false, audit_all = false;
+    bool use_ast = false, use_ir = false, use_git = false, use_mca = false, use_metal_air = false, audit_all = false;
     size_t struct_size = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -514,6 +769,7 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
             ast_json = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i]; use_ast = true;
         } else if (strcmp(argv[i], "--llvm-ir") == 0) use_ir = true;
         else if (strcmp(argv[i], "--mca") == 0) use_mca = true;
+        else if (strcmp(argv[i], "--metal-air") == 0) use_metal_air = true;
         else if (strcmp(argv[i], "--git-diff") == 0) use_git = true;
         else if ((strcmp(argv[i], "--shadow") == 0 && i + 1 < argc) || strncmp(argv[i], "--shadow=", 9) == 0)
             shadow_out = (argv[i][8] == '=') ? argv[i] + 9 : argv[++i];
@@ -541,6 +797,7 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
         fprintf(stderr, "Error: failed to parse %s\n", target_c); return 1;
     }
     route_llvm_and_git(target_c, ast_json, use_ast, use_ir, use_git, use_mca, &rep);
+    if (use_metal_air) route_metal_air(target_c, &rep);
     if (shadow_out && emit_shadow_tap(shadow_out, "flow_shadow") != 0) return 1;
     if (excavate_out && emit_excavated_skeleton(excavate_out, "flow_excavated") != 0) return 1;
     if (emit_metal && flowy_emit_gpu_shader(emit_metal, rep.struct_name, 73728, 57344, 16, false) != 0) return 1;
@@ -587,6 +844,15 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
             flowy_json_field_u64("mca_branches", rep.mca_branches, true);
             flowy_json_field_u64("mca_est_cycles", rep.mca_est_cycles, true);
         }
+        if (rep.metal_air_routed) {
+            flowy_json_field_str("air_backend", rep.air_backend, true);
+            flowy_json_field_u64("air_instructions", rep.air_instructions, true);
+            flowy_json_field_u64("air_alu_fops", rep.air_alu_fops, true);
+            flowy_json_field_u64("air_transcendentals", rep.air_transcendentals, true);
+            flowy_json_field_u64("air_branches", rep.air_branches, true);
+            flowy_json_field_u64("air_stack_spills", rep.air_stack_spills, true);
+            flowy_json_field_u64("air_est_vgprs", rep.air_est_vgprs, true);
+        }
         if (rep.git_diff_routed) {
             flowy_json_field_u64("git_added_lines", rep.git_added_lines, true); flowy_json_field_u64("git_deleted_lines", rep.git_deleted_lines, true);
         }
@@ -601,10 +867,17 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
                    rep.structs_total > 0 ? (double)rep.structs_univalent_64b * 100.0 / (double)rep.structs_total : 0.0);
             for (size_t i = 0; i < rep.parsed_structs_count; ++i) {
                 const ParsedStructInfo *st = &rep.parsed_structs[i];
+                char status_buf[48];
+                if (st->total_size == 64 && st->align == 64) {
+                    snprintf(status_buf, sizeof(status_buf), "PASS: Univalent 64B");
+                } else if (st->is_univalent && st->total_size > 64) {
+                    snprintf(status_buf, sizeof(status_buf), "PASS: Univalent %zux64B", st->total_size / 64);
+                } else {
+                    snprintf(status_buf, sizeof(status_buf), "NON-64B");
+                }
                 printf("  [%2zu] %-28s : %4zu Bytes (Align: %2zu, Pad: %2zu) -> [%s]\n",
                        i + 1, st->name[0] ? st->name : "(anon)",
-                       st->total_size, st->align, st->padding_bytes,
-                       st->is_univalent ? "PASS: Univalent 64B" : "NON-64B");
+                       st->total_size, st->align, st->padding_bytes, status_buf);
             }
         } else {
             size_t active_ws = (rep.structs_univalent_64b > 0) ? (rep.structs_univalent_64b * 64) : rep.total_size;
@@ -624,6 +897,11 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
         if (rep.mca_routed)
             printf("  - [MCA Static Audit (%s)] Instructions: %zu | Branches: %zu | Est. Cycles: %zu\n",
                    rep.mca_backend, rep.mca_instructions, rep.mca_branches, rep.mca_est_cycles);
+        if (rep.metal_air_routed)
+            printf("  - [Metal AIR Static Audit (%s)] SSA Insts: %zu | FPU ALU: %zu | SFU Transc: %zu | Branches: %zu | StackSpills: %zu | Est. VGPRs: %zu [%s]\n",
+                   rep.air_backend, rep.air_instructions, rep.air_alu_fops, rep.air_transcendentals,
+                   rep.air_branches, rep.air_stack_spills, rep.air_est_vgprs,
+                   (rep.air_stack_spills == 0 && rep.air_instructions > 0) ? "PASS: 0 Spills" : "WARN");
         if (rep.git_diff_routed) printf("  - [Git Delta] +%zu / -%zu lines\n", rep.git_added_lines, rep.git_deleted_lines);
     }
     return 0;

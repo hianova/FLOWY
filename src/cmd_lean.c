@@ -4,6 +4,8 @@
 #include <string.h>
 #include <inttypes.h>
 #include <ctype.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include "flow_asm.h"
 
 typedef struct {
@@ -23,11 +25,12 @@ typedef struct {
 
 static void print_lean_help(void) {
     printf("FLOWY lean — HoTT Contract, Integer-Lattice Proof Mint & Lean SSOT Route Compiler\n\n"
-           "USAGE:\n    flowy lean [OPTIONS] [spec.lean]\n\n"
+           "USAGE:\n    flowy lean [OPTIONS] [spec.lean...]\n\n"
            "OPTIONS:\n"
            "    --from-lean <in.lean>        Ingest existing Lean 4 SSOT specification\n"
            "    --emit-lean <out.lean>       Generate canonical self-contained Lean 4 theorem module\n"
            "    --verify                     Invoke Lean 4 kernel to verify proofs (0 sorryAx)\n"
+           "    --verify-all <files...>      Batch verify multiple Lean 4 specifications in parallel\n"
            "    --transition                 Synthesize & verify state-transition step invariants\n"
            "    --mint-abi <out.h>           Mint FlowUnit ABI hashes & 64B Univalent C struct from Lean\n"
            "    --compile-route <out.h>      Compile Lean-certified constants into FlowBusinessRoute64 header\n"
@@ -36,6 +39,78 @@ static void print_lean_help(void) {
            "    --emit-ffi <out.py|.ts|.swift> Emit 64B Zero-Copy FFI memory view\n"
            "    --json                       Deterministic JSON output for Agent consumption\n"
            "    -h, --help                   Print help information\n");
+}
+
+static int run_batch_lean_verify(const char **files, size_t count, bool json_mode) {
+    if (count == 0) {
+        fprintf(stderr, "Error: --verify-all requires at least one .lean file\n");
+        return 1;
+    }
+    printf("=== FLOWY Lean 4 Batch Verification (Parallel Kernel) ===\n");
+    printf("▶ Checking %zu Lean specification(s)...\n", count);
+
+    /* 1. Fast sorry scan */
+    for (size_t i = 0; i < count; ++i) {
+        FILE *f = fopen(files[i], "rb");
+        if (!f) {
+            fprintf(stderr, "Error: cannot open Lean file: %s\n", files[i]);
+            return 1;
+        }
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf) - 1, f)) > 0) {
+            buf[n] = '\0';
+            if (strstr(buf, "sorryAx") || strstr(buf, "sorry")) {
+                fclose(f);
+                fprintf(stderr, "Error: sorry axiom detected in %s! Aborting.\n", files[i]);
+                return 1;
+            }
+        }
+        fclose(f);
+    }
+
+    /* 2. Launch lean processes in parallel */
+    pid_t pids[64];
+    for (size_t i = 0; i < count && i < 64; ++i) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            freopen("/dev/null", "w", stdout);
+            freopen("/dev/null", "w", stderr);
+            execlp("lean", "lean", files[i], (char *)NULL);
+            _exit(127);
+        } else if (pid < 0) {
+            fprintf(stderr, "Error: fork failed for %s\n", files[i]);
+            return 1;
+        }
+        pids[i] = pid;
+    }
+
+    int failures = 0;
+    for (size_t i = 0; i < count && i < 64; ++i) {
+        int status = 0;
+        waitpid(pids[i], &status, 0);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "✗ Lean 4 Kernel rejected: %s (exit code %d)\n", files[i], WEXITSTATUS(status));
+            failures++;
+        } else {
+            printf("  ✓ Verified: %s (0 sorryAx)\n", files[i]);
+        }
+    }
+
+    if (failures > 0) {
+        fprintf(stderr, "Error: %d / %zu Lean 4 proofs failed verification.\n", failures, count);
+        return 1;
+    }
+
+    printf("✓ Lean 4 Batch Verification: %zu / %zu files certified sound (0 sorryAx)!\n", count, count);
+    if (json_mode) {
+        flowy_json_start();
+        flowy_json_field_str("subcommand", "lean_batch", true);
+        flowy_json_field_u64("verified_count", count, true);
+        flowy_json_field_bool("sound", true, false);
+        flowy_json_end();
+    }
+    return 0;
 }
 
 static int generate_lean_source(const char *lean_path) {
@@ -353,9 +428,13 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
     const char *emit_ffi[8] = {0};
     size_t emit_ffi_cnt = 0;
     bool verify = false, transition = false;
+    bool verify_all = false;
+    const char *verify_files[64];
+    size_t verify_file_count = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { print_lean_help(); return 0; }
+        else if (strcmp(argv[i], "--verify-all") == 0) verify_all = true;
         else if ((strcmp(argv[i], "--from-lean") == 0 && i + 1 < argc) || strncmp(argv[i], "--from-lean=", 12) == 0)
             from_lean = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
         else if ((strcmp(argv[i], "--emit-lean") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-lean=", 12) == 0)
@@ -373,7 +452,14 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
         else if ((strcmp(argv[i], "--emit-ffi") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-ffi=", 11) == 0) {
             const char *fp = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i];
             if (emit_ffi_cnt < 8) emit_ffi[emit_ffi_cnt++] = fp;
-        } else if (argv[i][0] != '-') from_lean = argv[i];
+        } else if (argv[i][0] != '-') {
+            if (verify_file_count < 64) verify_files[verify_file_count++] = argv[i];
+            if (!from_lean) from_lean = argv[i];
+        }
+    }
+
+    if (verify_all) {
+        return run_batch_lean_verify(verify_files, verify_file_count, json_mode);
     }
 
     const char *lean_file = from_lean ? from_lean : (emit_lean ? emit_lean : "lean/FlowContract.lean");
