@@ -30,40 +30,64 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
 
 clean:
-	rm -rf build/* lean/*.lean tests/tmp_*
+	rm -rf build/* tests/tmp_*
 
 check-loc:
 	@echo "Checking LOC in src/:"
 	@wc -l src/*
 
 test: $(TARGET)
-	@mkdir -p build tests
+	@mkdir -p build lean tests
 	@echo "=== Running FLOWY Test Suite ==="
-	# 1. Top-level help and version
+	# 1. Top-level help, version and subcommand help routing
 	$(TARGET) --help > /dev/null
+	$(TARGET) slice --help > /dev/null
+	$(TARGET) qpoly --help > /dev/null
+	$(TARGET) diff --help > /dev/null
+	$(TARGET) lean --help > /dev/null
+	$(TARGET) sieve --help > /dev/null
 	$(TARGET) --version
-	# 2. Subcommand: slice (Audit & Excavate)
-	$(TARGET) slice src/flowy_cli.c --json > build/slice_test.json
+	# 2. Subcommand: slice (64B Univalence Audit, LLVM AST/IR & Git routing, Shadow & Excavate)
+	$(TARGET) slice src/flowy_cli.h --audit-struct FlowBusinessRoute64 --json > build/slice_route64.json
+	$(TARGET) slice src/flowy_cli.c --llvm-ast --llvm-ir --git-diff --json > build/slice_test.json
+	$(TARGET) slice src/flowy_cli.c --shadow build/tmp_shadow.c
+	$(CC) -std=c11 $(INCLUDES) -c build/tmp_shadow.c -o build/tmp_shadow.o
 	$(TARGET) slice src/flowy_cli.c --excavate build/tmp_excavated.c
 	$(CC) -std=c11 $(INCLUDES) -c build/tmp_excavated.c -o build/tmp_excavated.o
+	$(TARGET) slice build/tmp_excavated.c --restore build/tmp_excavated.c
 	# 3. Subcommand: qpoly (Inner-quantization & Governor synthesis)
 	$(TARGET) qpoly --dim 1 --threshold 65536 --deadband 4096 --noise-floor 2048 --qshift-sweep --emit-c build/tmp_governor.h --json > build/qpoly_test.json
-	# 4. Subcommand: diff (3-mode algebraic wind tunnel)
+	# 4. Subcommand: diff (4-mode algebraic wind tunnel: arith, tunnel, chatter, ricardian)
 	$(TARGET) diff --mode arith --trials 10000 --json > build/diff_arith.json
 	$(TARGET) diff --mode tunnel --trials 10000 --json > build/diff_tunnel.json
 	$(TARGET) diff --mode chatter --trials 10000 --json > build/diff_chatter.json
-	# 5. Subcommand: lean (Formal proof generation & ABI mint)
-	$(TARGET) lean --emit-lean lean/FlowContract.lean --mint-abi build/flow_direct_unit_abi.h --json > build/lean_test.json
-	# 6. Subcommand: sieve (Boundary tag, Sieve pullback & Hex128 Capsule)
+	$(TARGET) diff --mode ricardian --trials 10000 --json > build/diff_ricardian.json
+	# 5. Subcommand: lean (Formal proof generation, ABI mint, 64B struct synthesis & Route Compilation)
+	$(TARGET) lean --emit-lean lean/FlowContract.lean --mint-abi build/flow_direct_unit_abi.h --compile-route build/flow_compiled_route.h --json > build/lean_test.json
+	@if [ -f ../Ricardian/ricardian.lean ]; then \
+		$(TARGET) lean --from-lean ../Ricardian/ricardian.lean --mint-abi build/ricardian_abi.h --json > build/lean_ricardian.json; \
+	fi
+	@if [ -f ../flow_game/include/flow_game.h ]; then \
+		$(TARGET) slice ../flow_game/include/flow_game.h --audit-struct FlowRelativeScale64 --json > build/slice_flow_game.json; \
+	fi
+	# 6. Subcommand: sieve (Boundary tag, Sieve pullback, Kan Homotopy, HIT Quotient, Wave64 & Hex128 Capsule)
 	$(TARGET) sieve --decode-tag 0x7FF8400010040000 --json > build/sieve_tag.json
 	$(TARGET) sieve --decode-sieve 0x3FF --json > build/sieve_mask.json
+	$(TARGET) sieve --homotopy 0x3FF 0x3FE --json > build/sieve_homotopy.json
+	$(TARGET) sieve --quotient 0x3FF,0x001 --json > build/sieve_quotient.json
+	$(TARGET) sieve --wave64 0x0000FFFF0000FFFF --json > build/sieve_wave64.json
+	$(TARGET) sieve --check-qsbr --json > build/sieve_qsbr.json
 	$(TARGET) sieve --capsule-encode "FLOW_UNIVALENT_CAPSULE_PAYLOAD" --json > build/capsule_enc.json
+	$(TARGET) sieve --capsule-decode 464c4f575f554e4956414c454e545f43415053554c455f5041594c4f4144000000000000000000000000000000000000000000000000000079c33513c3dc78b6 --json > build/capsule_dec.json
 	# 7. End-to-end integration test runner
-	$(CC) $(CFLAGS) $(INCLUDES) tests/test_e2e.c -o build/test_e2e $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) tests/test_e2e.c src/flowy_cli.c -o build/test_e2e $(LDFLAGS)
 	./build/test_e2e
 	@echo "=== All Tests Passed Successfully! ==="
 
 verify-lean: $(TARGET)
 	@mkdir -p lean
 	$(TARGET) lean --emit-lean lean/FlowContract.lean --verify --json
+	@if [ -f ../Ricardian/ricardian.lean ]; then \
+		$(TARGET) lean --from-lean ../Ricardian/ricardian.lean --verify --json; \
+	fi
 	@echo "=== Lean 4 Verification Verified (0 sorryAx)! ==="

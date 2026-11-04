@@ -14,8 +14,10 @@ static void print_qpoly_help(void) {
            "    --dim <N>             Dimension of state space (default: 1)\n"
            "    --threshold <T>       Nominal threshold value (integer or Q16, default: 65536)\n"
            "    --deadband <D>        Hysteresis deadband half-width (default: 4096)\n"
+           "    --b-enter <E>         Explicit upper trip bound b_enter (overrides threshold+deadband)\n"
+           "    --b-exit <X>          Explicit lower release bound b_exit (overrides threshold-deadband)\n"
            "    --noise-floor <N>     Estimated sensor noise floor (default: 2048)\n"
-           "    --qshift-sweep        Perform conservative inner quantization Q-shift sweep (1..24)\n"
+           "    --qshift-sweep        Perform conservative inner quantization Q-shift sweep (8..24)\n"
            "    --emit-c <out.h>      Emit FLOW_QPOLY_DEFINE_EX C header\n"
            "    --json                Deterministic JSON output for Agent consumption\n"
            "    -h, --help            Print help information\n");
@@ -27,135 +29,87 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode) {
     int64_t threshold = 65536;
     int64_t deadband = 4096;
     int64_t noise_floor = 2048;
+    int64_t explicit_enter = 0, explicit_exit = 0;
+    bool has_enter = false, has_exit = false;
     bool qshift_sweep = false;
     const char *emit_c = NULL;
 
-    for (int i = 0; i < argc; ++i) {
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            print_qpoly_help();
-            return 0;
-        } else if (strcmp(argv[i], "--dim") == 0 && i + 1 < argc) {
-            dim = (size_t)strtoull(argv[++i], NULL, 10);
-        } else if (strncmp(argv[i], "--dim=", 6) == 0) {
-            dim = (size_t)strtoull(argv[i] + 6, NULL, 10);
-        } else if (strcmp(argv[i], "--threshold") == 0 && i + 1 < argc) {
-            threshold = strtoll(argv[++i], NULL, 10);
-        } else if (strncmp(argv[i], "--threshold=", 12) == 0) {
-            threshold = strtoll(argv[i] + 12, NULL, 10);
-        } else if (strcmp(argv[i], "--deadband") == 0 && i + 1 < argc) {
-            deadband = strtoll(argv[++i], NULL, 10);
-        } else if (strncmp(argv[i], "--deadband=", 11) == 0) {
-            deadband = strtoll(argv[i] + 11, NULL, 10);
-        } else if (strcmp(argv[i], "--noise-floor") == 0 && i + 1 < argc) {
-            noise_floor = strtoll(argv[++i], NULL, 10);
-        } else if (strncmp(argv[i], "--noise-floor=", 14) == 0) {
-            noise_floor = strtoll(argv[i] + 14, NULL, 10);
-        } else if (strcmp(argv[i], "--qshift-sweep") == 0) {
-            qshift_sweep = true;
-        } else if (strcmp(argv[i], "--emit-c") == 0 && i + 1 < argc) {
-            emit_c = argv[++i];
-        } else if (strncmp(argv[i], "--emit-c=", 9) == 0) {
-            emit_c = argv[i] + 9;
-        } else if (argv[i][0] != '-') {
-            spec_str = argv[i];
-        }
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { print_qpoly_help(); return 0; }
+        else if ((strcmp(argv[i], "--dim") == 0 && i + 1 < argc) || strncmp(argv[i], "--dim=", 6) == 0)
+            dim = (size_t)strtoull((argv[i][5] == '=') ? argv[i] + 6 : argv[++i], NULL, 10);
+        else if ((strcmp(argv[i], "--threshold") == 0 && i + 1 < argc) || strncmp(argv[i], "--threshold=", 12) == 0)
+            threshold = strtoll((argv[i][11] == '=') ? argv[i] + 12 : argv[++i], NULL, 10);
+        else if ((strcmp(argv[i], "--deadband") == 0 && i + 1 < argc) || strncmp(argv[i], "--deadband=", 11) == 0)
+            deadband = strtoll((argv[i][10] == '=') ? argv[i] + 11 : argv[++i], NULL, 10);
+        else if ((strcmp(argv[i], "--b-enter") == 0 && i + 1 < argc) || strncmp(argv[i], "--b-enter=", 10) == 0) {
+            explicit_enter = strtoll((argv[i][9] == '=') ? argv[i] + 10 : argv[++i], NULL, 10); has_enter = true;
+        } else if ((strcmp(argv[i], "--b-exit") == 0 && i + 1 < argc) || strncmp(argv[i], "--b-exit=", 9) == 0) {
+            explicit_exit = strtoll((argv[i][8] == '=') ? argv[i] + 9 : argv[++i], NULL, 10); has_exit = true;
+        } else if ((strcmp(argv[i], "--noise-floor") == 0 && i + 1 < argc) || strncmp(argv[i], "--noise-floor=", 14) == 0)
+            noise_floor = strtoll((argv[i][13] == '=') ? argv[i] + 14 : argv[++i], NULL, 10);
+        else if (strcmp(argv[i], "--qshift-sweep") == 0) qshift_sweep = true;
+        else if ((strcmp(argv[i], "--emit-c") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-c=", 9) == 0)
+            emit_c = (argv[i][8] == '=') ? argv[i] + 9 : argv[++i];
+        else if (argv[i][0] != '-') spec_str = argv[i];
     }
 
-    if (deadband < noise_floor) {
-        deadband = noise_floor * 2; /* enforce safety margin >= 2x noise floor */
-    }
+    if (deadband < noise_floor) deadband = noise_floor * 2;
+    int64_t b_enter = has_enter ? explicit_enter : (threshold + deadband);
+    int64_t b_exit  = has_exit  ? explicit_exit  : (threshold - deadband);
+    if (b_exit > b_enter) { fprintf(stderr, "Error: b_exit (%" PRId64 ") > b_enter (%" PRId64 ")\n", b_exit, b_enter); return 1; }
+    if (has_enter && has_exit) { threshold = (b_enter + b_exit) / 2; deadband = (b_enter - b_exit) / 2; }
+    if (dim == 0) dim = 1; else if (dim > 4) dim = 4;
 
-    int64_t b_enter = threshold + deadband;
-    int64_t b_exit = threshold - deadband;
-
-    if (dim == 0) dim = 1;
-    if (dim > 4) dim = 4;
-
-    /* Call flow's core flow_qpoly_quantize_inner to compute conservative normal matrix & quantized bounds */
-    int64_t a_num[4] = {1, 0, 0, 0};
-    int64_t b_num[1] = {threshold};
-    int64_t denom = 1;
-    int64_t box_min[4] = {-1000000, -1000000, -1000000, -1000000};
-    int64_t box_max[4] = {1000000, 1000000, 1000000, 1000000};
-    int32_t a_q[4] = {0};
-    int64_t b_q[1] = {0};
-
-    uint32_t optimal_qshift = 16;
-    size_t false_negatives = 0;
+    int64_t a_num[4] = {1, 0, 0, 0}, b_num[1] = {threshold}, denom = 1;
+    int64_t box_min[4] = {-1000000, -1000000, -1000000, -1000000}, box_max[4] = {1000000, 1000000, 1000000, 1000000};
+    int32_t a_q[4] = {0}; int64_t b_q[1] = {0};
+    uint32_t optimal_qshift = 16; size_t false_negatives = 0;
 
     if (qshift_sweep) {
-        for (uint32_t shift = 8; shift <= 24; ++shift) {
-            int ok = flow_qpoly_quantize_inner(1, dim, shift, a_num, b_num, denom, box_min, box_max, a_q, b_q);
-            if (ok) {
-                optimal_qshift = shift;
-            }
-        }
+        for (uint32_t shift = 8; shift <= 24; ++shift)
+            if (flow_qpoly_quantize_inner(1, dim, shift, a_num, b_num, denom, box_min, box_max, a_q, b_q)) optimal_qshift = shift;
     } else {
         flow_qpoly_quantize_inner(1, dim, optimal_qshift, a_num, b_num, denom, box_min, box_max, a_q, b_q);
     }
 
     if (emit_c) {
         FILE *f = fopen(emit_c, "w");
-        if (f) {
-            fprintf(f, "/* Generated by FLOWY qpoly with conservative inner quantization */\n");
-            fprintf(f, "#ifndef FLOW_SYNTHESIZED_GOVERNOR_H\n");
-            fprintf(f, "#define FLOW_SYNTHESIZED_GOVERNOR_H\n\n");
-            fprintf(f, "#include \"flow_hott_jet.h\"\n\n");
-            fprintf(f, "#define GOVERNOR_DIM %zu\n", dim);
-            fprintf(f, "#define GOVERNOR_SHIFT %u\n", optimal_qshift);
-            fprintf(f, "#define GOVERNOR_B_ENTER %" PRId64 "LL\n", b_enter);
-            fprintf(f, "#define GOVERNOR_B_EXIT  %" PRId64 "LL\n\n", b_exit);
-            fprintf(f, "FLOW_QPOLY_DEFINE_EX(FlowGovernorPoly, GOVERNOR_DIM, GOVERNOR_SHIFT, 4)\n\n");
-            fprintf(f, "static inline void flow_governor_setup(FlowGovernorPoly *poly) {\n");
-            fprintf(f, "    FlowGovernorPoly_init(poly);\n");
-            fprintf(f, "    FlowGovernorPoly_set_hysteresis(poly, 0, GOVERNOR_B_ENTER, GOVERNOR_B_EXIT);\n");
-            fprintf(f, "}\n\n");
-            fprintf(f, "/* Transition step check using cubical Kan homotopy */\n");
-            fprintf(f, "static inline FlowKanStatus flow_governor_step_neighbor(uint64_t mask, uint32_t bit, uint64_t *next_mask) {\n");
-            fprintf(f, "    return flow_cubical_step_neighbor(mask, bit, ~0ULL, next_mask);\n");
-            fprintf(f, "}\n\n");
-            fprintf(f, "/* 2-Jet next-face boundary forecast */\n");
-            fprintf(f, "static inline FlowQPolyForecast flow_governor_predict(const FlowGovernorPoly *poly, const int32_t *x, const int32_t *dx, const int32_t *ddx) {\n");
-            fprintf(f, "    return flow_qpoly_predict_next_face(&poly->A[0][0], (const int64_t *)poly->b, poly->active_mask, GOVERNOR_DIM, x, dx, ddx);\n");
-            fprintf(f, "}\n\n");
-            fprintf(f, "#endif /* FLOW_SYNTHESIZED_GOVERNOR_H */\n");
-            fclose(f);
-        }
+        if (!f) { fprintf(stderr, "Error: failed to open %s\n", emit_c); return 1; }
+        fprintf(f, "/* Generated by FLOWY qpoly with conservative inner quantization */\n"
+                   "#ifndef FLOW_SYNTHESIZED_GOVERNOR_H\n#define FLOW_SYNTHESIZED_GOVERNOR_H\n\n#include \"flow_hott_jet.h\"\n\n"
+                   "#define GOVERNOR_DIM          %zu\n#define GOVERNOR_SHIFT        %u\n"
+                   "#define GOVERNOR_QUANTIZED_A0 %d\n#define GOVERNOR_QUANTIZED_B0 %" PRId64 "LL\n"
+                   "#define GOVERNOR_B_ENTER      %" PRId64 "LL\n#define GOVERNOR_B_EXIT       %" PRId64 "LL\n\n"
+                   "FLOW_QPOLY_DEFINE_EX(FlowGovernorPoly, GOVERNOR_DIM, GOVERNOR_SHIFT, 4)\n\n"
+                   "static inline void flow_governor_setup(FlowGovernorPoly *poly) {\n"
+                   "    FlowGovernorPoly_init(poly);\n    poly->A[0][0] = 1;\n"
+                   "    FlowGovernorPoly_set_hysteresis(poly, 0, GOVERNOR_B_ENTER, GOVERNOR_B_EXIT);\n}\n\n"
+                   "static inline FlowKanStatus flow_governor_step_neighbor(uint64_t mask, uint32_t bit, uint64_t *next_mask) {\n"
+                   "    return flow_cubical_step_neighbor(mask, bit, ~0ULL, next_mask);\n}\n\n"
+                   "static inline FlowQPolyForecast flow_governor_predict(const FlowGovernorPoly *poly, const int32_t *x, const int32_t *dx, const int32_t *ddx) {\n"
+                   "    return flow_qpoly_predict_next_face(&poly->A[0][0], (const int64_t *)poly->b, poly->active_mask, GOVERNOR_DIM, x, dx, ddx);\n}\n\n"
+                   "#endif /* FLOW_SYNTHESIZED_GOVERNOR_H */\n",
+                dim, optimal_qshift, a_q[0], b_q[0], b_enter, b_exit);
+        fclose(f);
     }
 
     if (json_mode) {
         flowy_json_start();
-        flowy_json_field_str("spec", spec_str, true);
-        flowy_json_field_u64("dimension", dim, true);
-        flowy_json_field_i64("nominal_threshold", threshold, true);
-        flowy_json_field_i64("deadband", deadband, true);
-        flowy_json_field_i64("b_enter", b_enter, true);
-        flowy_json_field_i64("b_exit", b_exit, true);
+        flowy_json_field_str("spec", spec_str, true); flowy_json_field_u64("dimension", dim, true);
+        flowy_json_field_i64("nominal_threshold", threshold, true); flowy_json_field_i64("deadband", deadband, true);
+        flowy_json_field_i64("b_enter", b_enter, true); flowy_json_field_i64("b_exit", b_exit, true);
         flowy_json_field_u64("optimal_qshift", optimal_qshift, true);
-        flowy_json_field_i64("quantized_a0", a_q[0], true);
-        flowy_json_field_i64("quantized_b0", b_q[0], true);
+        flowy_json_field_i64("quantized_a0", a_q[0], true); flowy_json_field_i64("quantized_b0", b_q[0], true);
         flowy_json_field_u64("false_negatives", false_negatives, true);
         flowy_json_field_str("emitted_header", emit_c ? emit_c : "none", false);
         flowy_json_end();
     } else {
-        printf("=== FLOWY Geometric QPoly Spec Compiler & Governor Synthesis ===\n");
-        printf("Spec Name              : %s\n", spec_str);
-        printf("Dimension (D)          : %zu\n", dim);
-        printf("Nominal Threshold      : %" PRId64 "\n", threshold);
-        printf("Noise Floor            : %" PRId64 "\n", noise_floor);
-        printf("Synthesized Deadband   : %" PRId64 "\n", deadband);
-        printf("Dual Bounds:\n");
-        printf("  - b_enter (trip)     : %" PRId64 "\n", b_enter);
-        printf("  - b_exit  (release)  : %" PRId64 "\n", b_exit);
-        printf("Quantization:\n");
-        printf("  - Optimal Q-Shift    : %u-bit fixed-point\n", optimal_qshift);
-        printf("  - Quantized A[0]     : %d\n", a_q[0]);
-        printf("  - Quantized b[0]     : %" PRId64 " (Inner conservative)\n", b_q[0]);
-        printf("  - False Negatives    : 0 (Strict inner approximation)\n");
-        if (emit_c) {
-            printf("Synthesized header written to: %s\n", emit_c);
-        }
+        printf("=== FLOWY Geometric QPoly Spec Compiler & Governor Synthesis ===\n"
+               "Spec: %s | Dim: %zu | Thresh: %" PRId64 " | Deadband: %" PRId64 " | Bounds: [%" PRId64 ", %" PRId64 "]\n"
+               "Quantization: Q%u | A[0]=%d | b[0]=%" PRId64 " | FalseNeg: 0\n",
+               spec_str, dim, threshold, deadband, b_exit, b_enter, optimal_qshift, a_q[0], b_q[0]);
+        if (emit_c) printf("Synthesized header written to: %s\n", emit_c);
     }
-
     return 0;
 }
