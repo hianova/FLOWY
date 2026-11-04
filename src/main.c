@@ -31,20 +31,19 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--json") == 0) {
             json_mode = true;
-        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            print_top_help();
-            return 0;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
             printf("flowy 0.0.1\n");
             return 0;
         } else if (argv[i][0] != '-' && subcmd_idx == -1) {
             subcmd_idx = i;
+            break;
         }
     }
 
+    /* If no subcommand was given and top-level -h/--help was requested */
     if (subcmd_idx == -1) {
         print_top_help();
-        return 1;
+        return 0;
     }
 
     const char *subcmd = argv[subcmd_idx];
