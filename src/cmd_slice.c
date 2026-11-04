@@ -413,7 +413,7 @@ static void route_llvm_and_git(const char *target_c, const char *ast_json, bool 
         rep->mca_est_cycles = (rep->mca_instructions > 0) ? ((rep->mca_instructions + 3) / 4 + rep->mca_branches * 2) : 1;
         if (system("command -v llvm-mca >/dev/null 2>&1") == 0) {
             snprintf(cmd, sizeof(cmd), "cc -x c -std=c11 -O2 -S "
-                     "-I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build \"%s\" -o - 2>/dev/null | llvm-mca 2>/dev/null",
+                     "-I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build \"%s\" -o - 2>/dev/null | llvm-mca --iterations=1 2>/dev/null",
                      tdir, tdir, tdir, target_c);
             FILE *mfp = popen(cmd, "r");
             if (mfp) {

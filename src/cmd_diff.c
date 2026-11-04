@@ -86,19 +86,57 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
     const char *invariant_status = "HOLD";
     uint64_t mode_hash = flowy_hash64(mode, strlen(mode), FLOW_GOLDEN_RATIO_64);
 
+    FlowCorpusRecord64 *recs = NULL;
+    size_t total_recs = 0;
+    if (replay_corpus) {
+        FILE *cf = fopen(replay_corpus, "rb");
+        if (!cf) {
+            fprintf(stderr, "Error: failed to open corpus file: %s\n", replay_corpus);
+            return 1;
+        }
+        if (fseek(cf, 0, SEEK_END) != 0) { fclose(cf); return 1; }
+        long fsz = ftell(cf);
+        if (fsz <= 0 || ((size_t)fsz % sizeof(FlowCorpusRecord64)) != 0) {
+            fclose(cf);
+            fprintf(stderr, "Error: corpus file %s must be a non-empty multiple of 64 bytes.\n", replay_corpus);
+            return 1;
+        }
+        rewind(cf);
+        total_recs = (size_t)fsz / sizeof(FlowCorpusRecord64);
+        recs = (FlowCorpusRecord64 *)calloc(total_recs, sizeof(FlowCorpusRecord64));
+        if (!recs) { fclose(cf); return 1; }
+        size_t nread = fread(recs, sizeof(FlowCorpusRecord64), total_recs, cf);
+        fclose(cf);
+        if (nread != total_recs) {
+            free(recs);
+            fprintf(stderr, "Error: short read on corpus file %s\n", replay_corpus);
+            return 1;
+        }
+    }
+
     FILE *corpus_out_fp = NULL;
     if (emit_corpus) {
         corpus_out_fp = fopen(emit_corpus, "wb");
         if (!corpus_out_fp) {
+            free(recs);
             fprintf(stderr, "Error: failed to open corpus output file: %s\n", emit_corpus);
             return 1;
         }
     }
 
-    /* Warm up code/stack pages prior to benchmark gate */
+    /* Warm up code/stack pages across all 5 wind-tunnel primitives prior to benchmark gate */
     {
         uint64_t warm_sieve = FLOW_ASM_SIEVE_ALL_SOUND;
         (void)flow_asm_qadd_i64(1, 2, &warm_sieve);
+        (void)flow_asm_qmul_shift16_i64(FLOW_Q16_ONE, FLOW_Q16_ONE, &warm_sieve);
+        (void)flow_asm_qdiv_shift16_i64(FLOW_Q16_ONE, FLOW_Q16_ONE, &warm_sieve);
+        (void)flow_asm_qsqrt_shift16_i64(FLOW_Q16_ONE, &warm_sieve);
+        FlowJet2 wj0 = flow_jet2_make(0, FLOW_Q16_ONE, 0), wj1 = flow_jet2_make(FLOW_Q16_ONE, FLOW_Q16_ONE, 0);
+        int64_t wt = 0;
+        (void)flow_jet2_solve_root(wj0, FLOW_Q16_ONE, &wt);
+        (void)flow_asm_jet2_self_check_step(wj0, wj1, FLOW_Q16_ONE, FLOW_Q16_ONE, FLOW_Q16_ONE, &warm_sieve);
+        volatile double w_sqrt = sqrt(0.5);
+        (void)w_sqrt;
     }
     struct rusage ru_before, ru_after;
     struct timespec ts_before, ts_after;
@@ -112,22 +150,6 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
     }
 
     if (replay_corpus) {
-        FILE *cf = fopen(replay_corpus, "rb");
-        if (!cf) {
-            if (corpus_out_fp) fclose(corpus_out_fp);
-            fprintf(stderr, "Error: failed to open corpus file: %s\n", replay_corpus);
-            return 1;
-        }
-        if (fseek(cf, 0, SEEK_END) != 0) { fclose(cf); if (corpus_out_fp) fclose(corpus_out_fp); return 1; }
-        long fsz = ftell(cf);
-        if (fsz <= 0 || ((size_t)fsz % sizeof(FlowCorpusRecord64)) != 0) {
-            fclose(cf);
-            if (corpus_out_fp) fclose(corpus_out_fp);
-            fprintf(stderr, "Error: corpus file %s must be a non-empty multiple of 64 bytes.\n", replay_corpus);
-            return 1;
-        }
-        rewind(cf);
-        size_t total_recs = (size_t)fsz / sizeof(FlowCorpusRecord64);
         trials = total_recs;
         uint64_t h_arith = flowy_hash64("arith", 5, FLOW_GOLDEN_RATIO_64);
         uint64_t h_tunnel = flowy_hash64("tunnel", 6, FLOW_GOLDEN_RATIO_64);
@@ -138,14 +160,17 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
         DiffGovernorPoly_init(&c_poly);
         c_poly.A[0][0] = 1;
         DiffGovernorPoly_set_hysteresis(&c_poly, 0, 11000, 9000);
+        uint64_t seen_mode_hash = 0;
+        bool multi_mode = false;
 
         for (size_t i = 0; i < total_recs; ++i) {
-            FlowCorpusRecord64 rec;
-            if (fread(&rec, sizeof(rec), 1, cf) != 1) { failures++; invariant_status = "CORPUS_READ_ERROR"; break; }
+            FlowCorpusRecord64 rec = recs[i];
             uint64_t calc_mac = flowy_hash64(&rec, offsetof(FlowCorpusRecord64, record_mac), FLOW_GOLDEN_RATIO_64);
             if (rec.magic != FLOW_CORPUS_MAGIC || rec.record_mac != calc_mac) {
                 failures++; witness_x = (int64_t)i; invariant_status = "CORPUS_MAC_CORRUPTED"; break;
             }
+            if (seen_mode_hash == 0) seen_mode_hash = rec.mode_hash;
+            else if (seen_mode_hash != rec.mode_hash) multi_mode = true;
             corpus_records++;
             precond_activations++;
             if (rec.mode_hash == h_arith || rec.mode_hash == h_conserv) {
@@ -160,8 +185,12 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
                 FlowJet2 x_jet = flow_jet2_make(rec.input_a * FLOW_Q16_ONE, rec.input_b * FLOW_Q16_ONE, 0);
                 FlowJet2 rel = flow_jet2_sub(x_jet, flow_jet2_const((rec.input_a + 3) * FLOW_Q16_ONE));
                 int64_t t_hit = 0;
-                (void)flow_jet2_solve_root(rel, FLOW_Q16_ONE, &t_hit);
-                if (t_hit != rec.expected_out) {
+                bool solved = flow_jet2_solve_root(rel, FLOW_Q16_ONE, &t_hit);
+                FlowJet2 next_jet = flow_jet2_make((rec.input_a + rec.input_b) * FLOW_Q16_ONE, rec.input_b * FLOW_Q16_ONE, 0);
+                uint64_t j_sieve = FLOW_ASM_SIEVE_ALL_SOUND;
+                uint64_t checked = flow_asm_jet2_self_check_step(x_jet, next_jet, FLOW_Q16_ONE, FLOW_Q16_ONE, FLOW_Q16_ONE, &j_sieve);
+                if (!solved || t_hit != rec.expected_out || j_sieve != rec.sieve_mask ||
+                    (checked & (FLOW_ASM_SIEVE_JET2_TAYLOR_0 | FLOW_ASM_SIEVE_JET2_TAYLOR_1)) == 0) {
                     failures++; witness_x = rec.input_a; witness_y = rec.input_b;
                     invariant_status = "CORPUS_REPLAY_MISMATCH"; break;
                 }
@@ -184,8 +213,18 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
                 failures++; witness_x = (int64_t)i;
                 invariant_status = "CORPUS_UNKNOWN_MODE"; break;
             }
+            if (corpus_out_fp) {
+                size_t dummy = 0;
+                write_corpus_step(corpus_out_fp, rec.mode_hash, rec.step_index, rec.input_a, rec.input_b, rec.expected_out, rec.sieve_mask, &dummy);
+            }
         }
-        fclose(cf);
+        free(recs);
+        if (multi_mode) mode = "multi";
+        else if (seen_mode_hash == h_arith) mode = "arith";
+        else if (seen_mode_hash == h_tunnel) mode = "tunnel";
+        else if (seen_mode_hash == h_chatter) mode = "chatter";
+        else if (seen_mode_hash == h_conserv) mode = "conservation";
+        else if (seen_mode_hash == h_relativ) mode = "relativistic";
         min_postcond_slack = 0;
         if (failures == 0) invariant_status = "HOLD (Binary Corpus Replay 100% Deterministic)";
     } else if (strcmp(mode, "arith") == 0) {
@@ -438,6 +477,7 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
             flowy_json_field_i64("ru_majflt_delta", majflt_delta, true);
             flowy_json_field_i64("ru_nvcsw_delta", nvcsw_delta, true);
             flowy_json_field_bool("zero_kernel_page_faults", zero_kernel_faults, true);
+            flowy_json_field_bool("zero_involuntary_ctx_switches", nvcsw_delta == 0, true);
         }
         if (auto_cegis) {
             flowy_json_field_bool("auto_cegis", true, true);

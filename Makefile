@@ -75,6 +75,8 @@ test: $(TARGET)
 	$(TARGET) lean --emit-lean lean/FlowContract.lean --transition --mint-abi build/flow_direct_unit_abi.h --compile-route build/flow_compiled_route.h --emit-metal build/flow_state.metal --emit-wgsl build/flow_state.wgsl --emit-ffi build/flow_state.py --emit-ffi build/flow_state.ts --emit-ffi build/flow_state.swift --json > build/lean_test.json
 	$(CC) -x c++ -std=c++14 -fsyntax-only build/flow_state.metal
 	python3 build/flow_state.py
+	node --input-type=module -e 'import { FlowCanonicalStateView, FLOW_QSHIFT } from "./build/flow_state.ts"; const b = new ArrayBuffer(64); const v = new FlowCanonicalStateView(b); v.setSlotU64(0, 99n); if (v.getSlotU64(0) !== 99n || FlowCanonicalStateView.BYTE_LENGTH !== 64 || FLOW_QSHIFT !== 16) process.exit(1);'
+	swiftc build/flow_state.swift -e 'let s = FlowCanonicalState(slot0: 42); assert(s.slot0 == 42 && flowVerifyFlowCanonicalStateUnivalent64())' -o build/test_swift_ffi && ./build/test_swift_ffi
 	# 6. Subcommand: sieve (Boundary tag, Sieve pullback, Kan Homotopy, HIT Quotient, Wave64, Hex128 Capsule & --verify-trace)
 	$(TARGET) sieve --decode-tag 0x7FF8400010040000 --json > build/sieve_tag.json
 	$(TARGET) sieve --decode-sieve 0x3FF --json > build/sieve_mask.json
@@ -85,9 +87,10 @@ test: $(TARGET)
 	$(TARGET) sieve --capsule-encode "FLOW_UNIVALENT_CAPSULE_PAYLOAD" --json > build/capsule_enc.json
 	$(TARGET) sieve --capsule-decode 464c4f575f554e4956414c454e545f43415053554c455f5041594c4f4144000000000000000000000000000000000000000000000000000079c33513c3dc78b6 --json > build/capsule_dec.json
 	$(TARGET) sieve --verify-trace 0x3FF,0x3FE,0x3FC,0x3FF --json > build/sieve_trace.json
-	# 7. Subcommand: init (One-command Lean 4 + C11 64B Univalent project scaffolding)
+	# 7. Subcommand: init (One-command Lean 4 + C11 64B Univalent + FLOW ASM project scaffolding)
 	$(TARGET) init build/tmp_scaffold_proj --json > build/init_test.json
 	$(MAKE) -C build/tmp_scaffold_proj test
+	$(MAKE) -C build/tmp_scaffold_proj verify-lean
 	# 8. End-to-end integration test runner
 	$(CC) $(CFLAGS) $(INCLUDES) tests/test_e2e.c src/flowy_cli.c -o build/test_e2e $(LDFLAGS)
 	./build/test_e2e

@@ -161,6 +161,22 @@ int main(void) {
     fclose(sf);
     assert(strstr(sbuf, "\"mca_instructions\":") != NULL);
     assert(strstr(sbuf, "\"mca_est_cycles\":") != NULL);
+    /* Verify single-iteration cycle count is not 100x inflated */
+    const char *inst_p = strstr(sbuf, "\"mca_instructions\":");
+    const char *cyc_p  = strstr(sbuf, "\"mca_est_cycles\":");
+    assert(inst_p && cyc_p);
+    size_t mca_inst = (size_t)strtoull(inst_p + 19, NULL, 10);
+    size_t mca_cyc  = (size_t)strtoull(cyc_p + 17, NULL, 10);
+    assert(mca_inst > 0 && mca_cyc > 0 && mca_cyc < mca_inst * 10);
+
+    /* Verify clang-asm-audit fallback when llvm-mca is not in PATH */
+    assert(system("PATH=/usr/bin:/bin ./build/flowy slice src/flowy_cli.c --mca --json > build/tmp_mca_fallback.json") == 0);
+    FILE *mff = fopen("build/tmp_mca_fallback.json", "r");
+    assert(mff != NULL);
+    char mfbuf[2048] = {0};
+    (void)fread(mfbuf, 1, sizeof(mfbuf) - 1, mff);
+    fclose(mff);
+    assert(strstr(mfbuf, "\"mca_backend\": \"clang-asm-audit\"") != NULL);
 
     FILE *bf = fopen("build/diff_arith.json", "r");
     assert(bf != NULL);
@@ -169,6 +185,7 @@ int main(void) {
     fclose(bf);
     assert(strstr(bbuf, "\"bench_enabled\": true") != NULL);
     assert(strstr(bbuf, "\"zero_kernel_page_faults\": true") != NULL);
+    assert(strstr(bbuf, "\"zero_involuntary_ctx_switches\":") != NULL);
 
     FILE *cf = fopen("build/diff_corpus_replay.json", "r");
     assert(cf != NULL);
@@ -177,6 +194,39 @@ int main(void) {
     fclose(cf);
     assert(strstr(cbuf, "\"corpus_records\": 256") != NULL);
     assert(strstr(cbuf, "\"failures\": 0") != NULL);
+
+    /* Test multi-mode corpus concatenation (all 5 modes) & same-file --corpus + --emit-corpus round-trip */
+    assert(system("./build/flowy diff --mode arith --trials 4 --emit-corpus build/tmp_c_arith.bin > /dev/null") == 0);
+    assert(system("./build/flowy diff --mode tunnel --trials 4 --emit-corpus build/tmp_c_tunnel.bin > /dev/null") == 0);
+    assert(system("./build/flowy diff --mode chatter --trials 4 --emit-corpus build/tmp_c_chatter.bin > /dev/null") == 0);
+    assert(system("./build/flowy diff --mode conservation --trials 4 --emit-corpus build/tmp_c_conserv.bin > /dev/null") == 0);
+    assert(system("./build/flowy diff --mode relativistic --trials 4 --emit-corpus build/tmp_c_relativ.bin > /dev/null") == 0);
+    {
+        const char *parts[5] = {
+            "build/tmp_c_arith.bin", "build/tmp_c_tunnel.bin", "build/tmp_c_chatter.bin",
+            "build/tmp_c_conserv.bin", "build/tmp_c_relativ.bin"
+        };
+        FILE *mc = fopen("build/tmp_multi_corpus.bin", "wb");
+        assert(mc != NULL);
+        for (int p = 0; p < 5; ++p) {
+            FILE *pf = fopen(parts[p], "rb");
+            assert(pf != NULL);
+            FlowCorpusRecord64 rbuf_arr[4];
+            assert(fread(rbuf_arr, sizeof(FlowCorpusRecord64), 4, pf) == 4);
+            fclose(pf);
+            assert(fwrite(rbuf_arr, sizeof(FlowCorpusRecord64), 4, mc) == 4);
+        }
+        fclose(mc);
+    }
+    assert(system("./build/flowy diff --corpus build/tmp_multi_corpus.bin --emit-corpus build/tmp_multi_corpus.bin --bench --json > build/tmp_multi_replay.json") == 0);
+    FILE *mrf = fopen("build/tmp_multi_replay.json", "r");
+    assert(mrf != NULL);
+    char mrbuf[2048] = {0};
+    (void)fread(mrbuf, 1, sizeof(mrbuf) - 1, mrf);
+    fclose(mrf);
+    assert(strstr(mrbuf, "\"mode\": \"multi\"") != NULL);
+    assert(strstr(mrbuf, "\"corpus_records\": 20") != NULL);
+    assert(strstr(mrbuf, "\"failures\": 0") != NULL);
 
     /* Corrupt a corpus byte and verify --corpus detects MAC failure */
     FILE *bad_c = fopen("build/tmp_bad_corpus.bin", "wb");
@@ -188,6 +238,29 @@ int main(void) {
     assert(fwrite(&bad_rec, sizeof(bad_rec), 1, bad_c) == 1);
     fclose(bad_c);
     assert(system("./build/flowy diff --corpus build/tmp_bad_corpus.bin > /dev/null 2>&1") != 0);
+
+    /* Truncated non-64-byte-aligned corpus must be rejected */
+    FILE *trunc_c = fopen("build/tmp_trunc_corpus.bin", "wb");
+    assert(trunc_c != NULL);
+    assert(fwrite(&bad_rec, 1, 37, trunc_c) == 37);
+    fclose(trunc_c);
+    assert(system("./build/flowy diff --corpus build/tmp_trunc_corpus.bin > /dev/null 2>&1") != 0);
+
+    /* Tunnel corpus record with altered sieve_mask (even with valid MAC) must be rejected */
+    {
+        FILE *tf_in = fopen("build/tmp_c_tunnel.bin", "rb");
+        assert(tf_in != NULL);
+        FlowCorpusRecord64 trec;
+        assert(fread(&trec, sizeof(trec), 1, tf_in) == 1);
+        fclose(tf_in);
+        trec.sieve_mask ^= 0x1ULL;
+        trec.record_mac = flowy_hash64(&trec, offsetof(FlowCorpusRecord64, record_mac), FLOW_GOLDEN_RATIO_64);
+        FILE *tf_bad = fopen("build/tmp_bad_tunnel_sieve.bin", "wb");
+        assert(tf_bad != NULL);
+        assert(fwrite(&trec, sizeof(trec), 1, tf_bad) == 1);
+        fclose(tf_bad);
+        assert(system("./build/flowy diff --corpus build/tmp_bad_tunnel_sieve.bin > /dev/null 2>&1") != 0);
+    }
 
     /* Verify --emit-ffi rejects unsupported extension and emits valid .py/.ts/.swift views */
     assert(flowy_emit_ffi_view("build/tmp_invalid.bad", "FlowState64", 73728, 57344, 16) != 0);
@@ -205,7 +278,16 @@ int main(void) {
     fclose(sw_f);
     assert(strstr(sw_buf, "@frozen") != NULL && strstr(sw_buf, "== 64") != NULL);
 
-    /* Verify scaffolded project from `flowy init` passes `flowy slice` and `flowy lean` */
+    /* Verify scaffolded project from `flowy init` (including trailing slash normalization and file rejection) */
+    assert(system("./build/flowy init build/tmp_scaffold_proj/// --json > build/tmp_init_slash.json") == 0);
+    FILE *isf = fopen("build/tmp_init_slash.json", "r");
+    assert(isf != NULL);
+    char isbuf[1024] = {0};
+    (void)fread(isbuf, 1, sizeof(isbuf) - 1, isf);
+    fclose(isf);
+    assert(strstr(isbuf, "\"target_dir\": \"build/tmp_scaffold_proj\"") != NULL);
+    assert(system("./build/flowy init build/tmp_init_slash.json > /dev/null 2>&1") != 0);
+
     assert(system("./build/flowy slice build/tmp_scaffold_proj/include/project_state.h --audit-all --json > build/tmp_init_slice.json") == 0);
     assert(system("./build/flowy lean --from-lean build/tmp_scaffold_proj/lean/Spec.lean --json > build/tmp_init_lean.json") == 0);
     FILE *ilf = fopen("build/tmp_init_lean.json", "r");
