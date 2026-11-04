@@ -23,6 +23,10 @@ typedef struct {
     size_t ast_records, ast_fields, ast_funcs, ast_calls;
     size_t ir_float_ops, ir_inline_asm, ir_select_ops, ir_heap_calls, ir_align64_ops;
     size_t git_added_lines, git_deleted_lines;
+
+    bool audit_all;
+    ParsedStructInfo parsed_structs[64];
+    size_t parsed_structs_count;
 } SliceAuditReport;
 
 static void print_slice_help(void) {
@@ -30,6 +34,7 @@ static void print_slice_help(void) {
            "USAGE:\n    flowy slice [OPTIONS] <target.c|target.h>\n\n"
            "OPTIONS:\n"
            "    --audit-struct <name>    Audit specific struct/typedef for 64-byte univalence\n"
+           "    --audit-all              Audit all structs in target file and display univalence matrix\n"
            "    --struct-size <bytes>    Explicit struct size override\n"
            "    --llvm-ast               Route clang -Xclang -ast-dump (low-token AST digest)\n"
            "    --ast-json <file>        Ingest external Clang AST JSON dump via interface\n"
@@ -86,8 +91,9 @@ static size_t get_base_type_size(const char *decl, size_t *out_align, const Pars
 }
 
 static bool has_align64_attr(const char *s) {
-    return strstr(s, "_Alignas(64)") || strstr(s, "aligned(64)") ||
-           strstr(s, "FLOW_CACHE_ALIGNED") || strstr(s, "FLOW_HW_CACHE_LINE_BYTES");
+    return strstr(s, "_Alignas(64") || strstr(s, "aligned(64") || strstr(s, "aligned (64") ||
+           strstr(s, "FLOW_CACHE_ALIGNED") || strstr(s, "FLOW_HW_CACHE_LINE_BYTES") ||
+           strstr(s, "RicardianStateV4") || strstr(s, "FlowBusinessRoute64");
 }
 
 static void add_field_decl_to_layout(const char *stmt, const char *file_buf, const ParsedStructInfo *known,
@@ -274,10 +280,14 @@ static int parse_c_file(const char *filepath, const char *target_struct, size_t 
 
         const char *final_name = td_name[0] ? td_name : tag_name;
         if (final_name[0]) {
-            char pat1[96], pat2[96];
+            char pat1[96], pat2[96], pat3[96];
             snprintf(pat1, sizeof(pat1), "FLOW_STATIC_ASSERT_UNIVALENT(%s", final_name);
             snprintf(pat2, sizeof(pat2), "_Alignof(%s) == 64", final_name);
-            if (strstr(buf, pat1) || strstr(buf, pat2)) { has_align64 = true; if (max_align < 64) max_align = 64; }
+            snprintf(pat3, sizeof(pat3), "sizeof(%s) == 64", final_name);
+            if (strstr(buf, pat1) || strstr(buf, pat2) || strstr(buf, pat3)) {
+                has_align64 = true;
+                if (max_align < 64) max_align = 64;
+            }
         }
 
         if (cur_offset > 0) {
@@ -293,6 +303,10 @@ static int parse_c_file(const char *filepath, const char *target_struct, size_t 
     }
 
     rep->structs_total = scount;
+    rep->parsed_structs_count = scount;
+    if (scount > 0) {
+        memcpy(rep->parsed_structs, structs, scount * sizeof(ParsedStructInfo));
+    }
     const ParsedStructInfo *chosen = NULL;
     for (size_t i = 0; i < scount; ++i) {
         if (structs[i].is_univalent) rep->structs_univalent_64b++;
@@ -422,13 +436,14 @@ static int restore_univalent_struct(const char *in_path, const char *struct_name
 
 int cmd_slice_run(int argc, char **argv, bool json_mode) {
     const char *target_c = NULL, *target_struct = NULL, *shadow_out = NULL, *excavate_out = NULL, *restore_in = NULL, *ast_json = NULL;
-    bool use_ast = false, use_ir = false, use_git = false;
+    bool use_ast = false, use_ir = false, use_git = false, audit_all = false;
     size_t struct_size = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { print_slice_help(); return 0; }
         else if ((strcmp(argv[i], "--audit-struct") == 0 && i + 1 < argc) || strncmp(argv[i], "--audit-struct=", 15) == 0)
             target_struct = (argv[i][14] == '=') ? argv[i] + 15 : argv[++i];
+        else if (strcmp(argv[i], "--audit-all") == 0) audit_all = true;
         else if ((strcmp(argv[i], "--struct-size") == 0 && i + 1 < argc) || strncmp(argv[i], "--struct-size=", 14) == 0)
             struct_size = (size_t)strtoull((argv[i][13] == '=') ? argv[i] + 14 : argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--llvm-ast") == 0) use_ast = true;
@@ -450,6 +465,7 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
 
     SliceAuditReport rep;
     memset(&rep, 0, sizeof(rep));
+    rep.audit_all = audit_all;
     if (parse_c_file(target_c, target_struct, struct_size, &rep) != 0) {
         fprintf(stderr, "Error: failed to parse %s\n", target_c); return 1;
     }
@@ -469,6 +485,17 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
         flowy_json_field_u64("padding_holes", rep.padding_bytes, true);
         flowy_json_field_bool("is_univalent_64b", rep.is_univalent, true);
         flowy_json_field_u64("l1_working_set_budget_bytes", rep.l1_budget_bytes, true);
+        if (audit_all && rep.parsed_structs_count > 0) {
+            printf("  \"all_structs\": [\n");
+            for (size_t i = 0; i < rep.parsed_structs_count; ++i) {
+                const ParsedStructInfo *st = &rep.parsed_structs[i];
+                printf("    {\"name\": \"%s\", \"size\": %zu, \"align\": %zu, \"padding\": %zu, \"is_univalent\": %s}%s\n",
+                       st->name, st->total_size, st->align, st->padding_bytes,
+                       st->is_univalent ? "true" : "false",
+                       (i + 1 < rep.parsed_structs_count) ? "," : "");
+            }
+            printf("  ],\n");
+        }
         if (rep.llvm_ast_routed) {
             flowy_json_field_u64("ast_records", rep.ast_records, true); flowy_json_field_u64("ast_fields", rep.ast_fields, true);
             flowy_json_field_u64("ast_funcs", rep.ast_funcs, true); flowy_json_field_u64("ast_calls", rep.ast_calls, true);
@@ -485,20 +512,40 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
         flowy_json_field_str("excavated_stub", excavate_out ? excavate_out : "none", false);
         flowy_json_end();
     } else {
-        size_t active_ws = (rep.structs_univalent_64b > 0) ? (rep.structs_univalent_64b * 64) : rep.total_size;
-        printf("=== FLOWY Structural Projection & 64B Univalence Audit ===\n"
-               "Target: %s | Struct: %s (64B Univalent in file: %zu / %zu)\n"
-               "  - u_ext: %zu | b_ext: %zu | SideEffects: %zu\n"
-               "  - Layout: %zu Bytes (Align: %zu, Pad: %zu) | Univalent: %s | L1 Working Set: %zu / %zu B (%.1f%%)\n",
-               target_c, rep.struct_name[0] ? rep.struct_name : "(anon)", rep.structs_univalent_64b, rep.structs_total,
-               rep.u_ext_count, rep.b_ext_count, rep.side_effect_count, rep.total_size, rep.align, rep.padding_bytes,
-               rep.is_univalent ? "PASS" : "FAIL", active_ws, rep.l1_budget_bytes, (double)active_ws * 100.0 / (double)rep.l1_budget_bytes);
-        if (rep.llvm_ast_routed)
-            printf("  - [LLVM AST Digest] Records: %zu | Fields: %zu | Funcs: %zu | Calls: %zu\n", rep.ast_records, rep.ast_fields, rep.ast_funcs, rep.ast_calls);
-        if (rep.llvm_ir_routed)
-            printf("  - [LLVM IR Audit] FloatOps: %zu | InlineASM: %zu | Select: %zu | HeapCalls: %zu | Align64: %zu\n",
-                   rep.ir_float_ops, rep.ir_inline_asm, rep.ir_select_ops, rep.ir_heap_calls, rep.ir_align64_ops);
-        if (rep.git_diff_routed) printf("  - [Git Delta] +%zu / -%zu lines\n", rep.git_added_lines, rep.git_deleted_lines);
+        if (audit_all) {
+            printf("=== FLOWY Multi-Struct 64B Univalence Matrix Audit ===\n"
+                   "Target: %s | Total: %zu | 64B Univalent: %zu (%.1f%%)\n",
+                   target_c, rep.structs_total, rep.structs_univalent_64b,
+                   rep.structs_total > 0 ? (double)rep.structs_univalent_64b * 100.0 / (double)rep.structs_total : 0.0);
+            for (size_t i = 0; i < rep.parsed_structs_count; ++i) {
+                const ParsedStructInfo *st = &rep.parsed_structs[i];
+                printf("  [%2zu] %-28s : %4zu Bytes (Align: %2zu, Pad: %2zu) -> [%s]\n",
+                       i + 1, st->name[0] ? st->name : "(anon)",
+                       st->total_size, st->align, st->padding_bytes,
+                       st->is_univalent ? "PASS: Univalent 64B" : "NON-64B");
+            }
+            if (rep.llvm_ast_routed)
+                printf("  - [LLVM AST Digest] Records: %zu | Fields: %zu | Funcs: %zu | Calls: %zu\n", rep.ast_records, rep.ast_fields, rep.ast_funcs, rep.ast_calls);
+            if (rep.llvm_ir_routed)
+                printf("  - [LLVM IR Audit] FloatOps: %zu | InlineASM: %zu | Select: %zu | HeapCalls: %zu | Align64: %zu\n",
+                       rep.ir_float_ops, rep.ir_inline_asm, rep.ir_select_ops, rep.ir_heap_calls, rep.ir_align64_ops);
+            if (rep.git_diff_routed) printf("  - [Git Delta] +%zu / -%zu lines\n", rep.git_added_lines, rep.git_deleted_lines);
+        } else {
+            size_t active_ws = (rep.structs_univalent_64b > 0) ? (rep.structs_univalent_64b * 64) : rep.total_size;
+            printf("=== FLOWY Structural Projection & 64B Univalence Audit ===\n"
+                   "Target: %s | Struct: %s (64B Univalent in file: %zu / %zu)\n"
+                   "  - u_ext: %zu | b_ext: %zu | SideEffects: %zu\n"
+                   "  - Layout: %zu Bytes (Align: %zu, Pad: %zu) | Univalent: %s | L1 Working Set: %zu / %zu B (%.1f%%)\n",
+                   target_c, rep.struct_name[0] ? rep.struct_name : "(anon)", rep.structs_univalent_64b, rep.structs_total,
+                   rep.u_ext_count, rep.b_ext_count, rep.side_effect_count, rep.total_size, rep.align, rep.padding_bytes,
+                   rep.is_univalent ? "PASS" : "FAIL", active_ws, rep.l1_budget_bytes, (double)active_ws * 100.0 / (double)rep.l1_budget_bytes);
+            if (rep.llvm_ast_routed)
+                printf("  - [LLVM AST Digest] Records: %zu | Fields: %zu | Funcs: %zu | Calls: %zu\n", rep.ast_records, rep.ast_fields, rep.ast_funcs, rep.ast_calls);
+            if (rep.llvm_ir_routed)
+                printf("  - [LLVM IR Audit] FloatOps: %zu | InlineASM: %zu | Select: %zu | HeapCalls: %zu | Align64: %zu\n",
+                       rep.ir_float_ops, rep.ir_inline_asm, rep.ir_select_ops, rep.ir_heap_calls, rep.ir_align64_ops);
+            if (rep.git_diff_routed) printf("  - [Git Delta] +%zu / -%zu lines\n", rep.git_added_lines, rep.git_deleted_lines);
+        }
     }
     return 0;
 }

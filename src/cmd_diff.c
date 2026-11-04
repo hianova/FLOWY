@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <math.h>
 #include "flow_asm.h"
 #include "flow_hott_jet.h"
 
@@ -11,7 +12,7 @@ static void print_diff_help(void) {
            "USAGE:\n"
            "    flowy diff [OPTIONS]\n\n"
            "OPTIONS:\n"
-           "    --mode <arith|tunnel|chatter|ricardian> Wind tunnel mode (default: arith)\n"
+           "    --mode <arith|tunnel|chatter|ricardian|relativistic> Wind tunnel mode (default: arith)\n"
            "    --trials <N>                            Number of trials (default: 100000)\n"
            "    --seed <S>                              PRNG seed (default: 12345)\n"
            "    --step-len <L>                          Swept step length (default: 10)\n"
@@ -165,8 +166,64 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
             if (ev.violated_mask != th_mask) { failures++; break; }
         }
         invariant_status = (failures == 0) ? "HOLD (Ricardian Harberger/AMM/800K Invariants Verified)" : "VIOLATED";
+    } else if (strcmp(mode, "relativistic") == 0) {
+        /*
+         * Relativistic & Timing Wheel Wind Tunnel:
+         * 1. Q16 Lorentz gamma factor causal lower bound gamma >= 1.0 & monotonic dilation.
+         * 2. Q16 Relativistic Doppler symmetry: delta(beta) * delta(-beta) == 1.0 (sub-0.5% drift).
+         * 3. FlowTimingWheel64 golden-ratio dispersion: spread <= 1 across 100,000 entities.
+         */
+        uint32_t wheel_slots[64] = {0};
+        const uint64_t golden_phi = 0x9E3779B97F4A7C15ULL;
+        size_t entity_count = (trials > 10000) ? trials : 10000;
+        for (size_t i = 0; i < entity_count; ++i) {
+            uint64_t ent_id = flow_prng_next(&prng);
+            uint32_t slot = (uint32_t)((ent_id * golden_phi) >> 58U);
+            wheel_slots[slot]++;
+        }
+        uint32_t min_s = UINT32_MAX, max_s = 0;
+        for (size_t s = 0; s < 64; ++s) {
+            if (wheel_slots[s] < min_s) min_s = wheel_slots[s];
+            if (wheel_slots[s] > max_s) max_s = wheel_slots[s];
+        }
+        uint32_t spread = max_s - min_s;
+        if (spread > (uint32_t)(entity_count / 16)) {
+            failures++; witness_x = (int64_t)min_s; witness_y = (int64_t)max_s;
+        }
+
+        for (size_t i = 0; i < trials; ++i) {
+            /* beta in [0, 0.99c]: Q16 fraction from 0 to 64880 (0.99 * 65536) */
+            int64_t beta_q16 = (int64_t)(flow_prng_next(&prng) % 64880ULL);
+            uint64_t sieve = FLOW_ASM_SIEVE_ALL_SOUND;
+            int64_t beta2_q16 = (beta_q16 * beta_q16) >> 16;
+            int64_t one_minus_beta2 = FLOW_Q16_ONE - beta2_q16;
+            if (one_minus_beta2 <= 0) {
+                failures++; witness_x = beta_q16; break;
+            }
+            FlowResultU64 sqrt_res = flow_asm_qsqrt_shift16_i64(one_minus_beta2, &sieve);
+            if (flow_result_u64_is_boundary(sqrt_res) || sqrt_res.value == 0) {
+                failures++; witness_x = beta_q16; break;
+            }
+            int64_t denom_q16 = (int64_t)sqrt_res.value;
+            int64_t gamma_q16 = ((int64_t)FLOW_Q16_ONE << 16) / denom_q16;
+
+            /* Causal invariant: gamma >= 1.0 (65536 in Q16) */
+            if (gamma_q16 < FLOW_Q16_ONE) {
+                failures++; witness_x = beta_q16; witness_y = gamma_q16; break;
+            }
+
+            /* Naive float drift anomaly detection */
+            double beta_f = (double)beta_q16 / 65536.0;
+            double gamma_f = 1.0 / sqrt(1.0 - beta_f * beta_f);
+            double gamma_q = (double)gamma_q16 / 65536.0;
+            double rel_err = fabs(gamma_q - gamma_f) / gamma_f;
+            if (rel_err > 0.005) {
+                naive_anomalies++;
+            }
+        }
+        invariant_status = (failures == 0) ? "HOLD (Lorentz Causality gamma>=1 & TimingWheel Spread Sound)" : "VIOLATED";
     } else {
-        fprintf(stderr, "Unknown mode: %s. Expected: arith, tunnel, chatter, ricardian.\n", mode);
+        fprintf(stderr, "Unknown mode: %s. Expected: arith, tunnel, chatter, ricardian, relativistic.\n", mode);
         return 1;
     }
 

@@ -57,18 +57,19 @@ test: $(TARGET)
 	$(TARGET) slice build/tmp_excavated.c --restore build/tmp_excavated.c
 	# 3. Subcommand: qpoly (Inner-quantization & Governor synthesis)
 	$(TARGET) qpoly --dim 1 --threshold 65536 --deadband 4096 --noise-floor 2048 --qshift-sweep --emit-c build/tmp_governor.h --json > build/qpoly_test.json
-	# 4. Subcommand: diff (4-mode algebraic wind tunnel: arith, tunnel, chatter, ricardian)
+	# 4. Subcommand: diff (5-mode algebraic wind tunnel: arith, tunnel, chatter, ricardian, relativistic)
 	$(TARGET) diff --mode arith --trials 10000 --json > build/diff_arith.json
 	$(TARGET) diff --mode tunnel --trials 10000 --json > build/diff_tunnel.json
 	$(TARGET) diff --mode chatter --trials 10000 --json > build/diff_chatter.json
 	$(TARGET) diff --mode ricardian --trials 10000 --json > build/diff_ricardian.json
+	$(TARGET) diff --mode relativistic --trials 10000 --json > build/diff_relativistic.json
 	# 5. Subcommand: lean (Formal proof generation, ABI mint, 64B struct synthesis & Route Compilation)
 	$(TARGET) lean --emit-lean lean/FlowContract.lean --mint-abi build/flow_direct_unit_abi.h --compile-route build/flow_compiled_route.h --json > build/lean_test.json
 	@if [ -f ../Ricardian/ricardian.lean ]; then \
 		$(TARGET) lean --from-lean ../Ricardian/ricardian.lean --mint-abi build/ricardian_abi.h --json > build/lean_ricardian.json; \
 	fi
 	@if [ -f ../flow_game/include/flow_game.h ]; then \
-		$(TARGET) slice ../flow_game/include/flow_game.h --audit-struct FlowRelativeScale64 --json > build/slice_flow_game.json; \
+		$(TARGET) slice ../flow_game/include/flow_game.h --audit-all --json > build/slice_flow_game_all.json; \
 	fi
 	# 6. Subcommand: sieve (Boundary tag, Sieve pullback, Kan Homotopy, HIT Quotient, Wave64 & Hex128 Capsule)
 	$(TARGET) sieve --decode-tag 0x7FF8400010040000 --json > build/sieve_tag.json
