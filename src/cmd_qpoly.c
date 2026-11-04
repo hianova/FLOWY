@@ -22,6 +22,7 @@ static void print_qpoly_help(void) {
            "    --emit-c <out.h>      Emit FLOW_QPOLY_DEFINE_EX C header\n"
            "    --emit-metal <out.metal> Emit 64B Univalent Metal Shading Language buffer header\n"
            "    --emit-wgsl <out.wgsl>   Emit 64B Univalent WebGPU Shading Language uniform buffer\n"
+           "    --emit-ffi <out.py|.ts|.swift> Emit 64B Zero-Copy FFI memory view\n"
            "    --json                Deterministic JSON output for Agent consumption\n"
            "    -h, --help            Print help information\n");
 }
@@ -36,6 +37,8 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode) {
     bool has_enter = false, has_exit = false;
     bool qshift_sweep = false, auto_cegis = false;
     const char *emit_c = NULL, *emit_metal = NULL, *emit_wgsl = NULL;
+    const char *emit_ffi[8] = {0};
+    size_t emit_ffi_cnt = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { print_qpoly_help(); return 0; }
@@ -59,7 +62,10 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode) {
             emit_metal = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
         else if ((strcmp(argv[i], "--emit-wgsl") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-wgsl=", 12) == 0)
             emit_wgsl = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
-        else if (argv[i][0] != '-') spec_str = argv[i];
+        else if ((strcmp(argv[i], "--emit-ffi") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-ffi=", 11) == 0) {
+            const char *fp = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i];
+            if (emit_ffi_cnt < 8) emit_ffi[emit_ffi_cnt++] = fp;
+        } else if (argv[i][0] != '-') spec_str = argv[i];
     }
 
     if (deadband < noise_floor) deadband = noise_floor * 2;
@@ -84,6 +90,9 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode) {
 
     if (emit_metal && flowy_emit_gpu_shader(emit_metal, "FlowGovernorPoly64", b_enter, b_exit, optimal_qshift, false) != 0) return 1;
     if (emit_wgsl && flowy_emit_gpu_shader(emit_wgsl, "FlowGovernorPoly64", b_enter, b_exit, optimal_qshift, true) != 0) return 1;
+    for (size_t k = 0; k < emit_ffi_cnt; ++k) {
+        if (flowy_emit_ffi_view(emit_ffi[k], "FlowGovernorPoly64", b_enter, b_exit, optimal_qshift) != 0) return 1;
+    }
 
     if (emit_c) {
         FILE *f = fopen(emit_c, "w");

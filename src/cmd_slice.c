@@ -19,9 +19,11 @@ typedef struct {
     size_t structs_total, structs_univalent_64b;
     bool is_univalent;
     size_t l1_budget_bytes;
-    bool llvm_ast_routed, llvm_ir_routed, git_diff_routed;
+    bool llvm_ast_routed, llvm_ir_routed, git_diff_routed, mca_routed;
     size_t ast_records, ast_fields, ast_funcs, ast_calls;
     size_t ir_float_ops, ir_inline_asm, ir_select_ops, ir_heap_calls, ir_align64_ops;
+    size_t mca_instructions, mca_branches, mca_est_cycles;
+    char mca_backend[32];
     size_t git_added_lines, git_deleted_lines;
 
     bool audit_all;
@@ -39,11 +41,13 @@ static void print_slice_help(void) {
            "    --llvm-ast               Route clang -Xclang -ast-dump (low-token AST digest)\n"
            "    --ast-json <file>        Ingest external Clang AST JSON dump via interface\n"
            "    --llvm-ir                Route clang -S -emit-llvm -O2 (audit 0-float/ASM/align64)\n"
+           "    --mca                    Route clang -S -O2 + llvm-mca / static instruction & cycle audit\n"
            "    --git-diff               Route git diff on target for incremental migration\n"
            "    --shadow <out.c>         Emit Stage 1 Dual-Track Shadow Tap mirror\n"
            "    --excavate <out.c>       Emit Stage 2 FlowBusinessRoute64 ASM Router skeleton\n"
            "    --emit-metal <out.metal> Emit 64B Univalent Metal Shading Language buffer header\n"
            "    --emit-wgsl <out.wgsl>   Emit 64B Univalent WebGPU Shading Language uniform buffer\n"
+           "    --emit-ffi <out.py|.ts|.swift> Emit 64B Zero-Copy FFI memory view\n"
            "    --restore <in.c>         Validate or restore univalent struct definition\n"
            "    --json                   Deterministic JSON output\n"
            "    -h, --help               Print help information\n");
@@ -339,7 +343,7 @@ static int parse_c_file(const char *filepath, const char *target_struct, size_t 
     return 0;
 }
 
-static void route_llvm_and_git(const char *target_c, const char *ast_json, bool do_ast, bool do_ir, bool do_git, SliceAuditReport *rep) {
+static void route_llvm_and_git(const char *target_c, const char *ast_json, bool do_ast, bool do_ir, bool do_git, bool do_mca, SliceAuditReport *rep) {
     char cmd[1024], line[1024], tdir[256] = ".";
     const char *slash = target_c ? strrchr(target_c, '/') : NULL;
     if (slash && (size_t)(slash - target_c) < sizeof(tdir)) {
@@ -381,6 +385,50 @@ static void route_llvm_and_git(const char *target_c, const char *ast_json, bool 
                 if (strstr(line, "align 64")) rep->ir_align64_ops++;
             }
             pclose(fp);
+        }
+    }
+    if (do_mca) {
+        rep->mca_routed = true;
+        snprintf(rep->mca_backend, sizeof(rep->mca_backend), "clang-asm-audit");
+        snprintf(cmd, sizeof(cmd), "cc -x c -std=c11 -O2 -S "
+                 "-I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build \"%s\" -o - 2>/dev/null",
+                 tdir, tdir, tdir, target_c);
+        FILE *fp = popen(cmd, "r");
+        if (fp) {
+            while (fgets(line, sizeof(line), fp)) {
+                const char *s = line;
+                while (*s && isspace((unsigned char)*s)) s++;
+                if (isalpha((unsigned char)*s) && *s != '.' && !strchr(s, ':')) {
+                    rep->mca_instructions++;
+                    if (strncmp(s, "b.", 2) == 0 || strncmp(s, "cbz", 3) == 0 || strncmp(s, "cbnz", 4) == 0 ||
+                        strncmp(s, "tbz", 3) == 0 || strncmp(s, "tbnz", 4) == 0 || strncmp(s, "je", 2) == 0 ||
+                        strncmp(s, "jne", 3) == 0 || strncmp(s, "jg", 2) == 0 || strncmp(s, "jl", 2) == 0 ||
+                        strncmp(s, "ja", 2) == 0 || strncmp(s, "jb", 2) == 0 || strncmp(s, "jmp", 3) == 0) {
+                        rep->mca_branches++;
+                    }
+                }
+            }
+            pclose(fp);
+        }
+        rep->mca_est_cycles = (rep->mca_instructions > 0) ? ((rep->mca_instructions + 3) / 4 + rep->mca_branches * 2) : 1;
+        if (system("command -v llvm-mca >/dev/null 2>&1") == 0) {
+            snprintf(cmd, sizeof(cmd), "cc -x c -std=c11 -O2 -S "
+                     "-I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build \"%s\" -o - 2>/dev/null | llvm-mca 2>/dev/null",
+                     tdir, tdir, tdir, target_c);
+            FILE *mfp = popen(cmd, "r");
+            if (mfp) {
+                while (fgets(line, sizeof(line), mfp)) {
+                    const char *tc = strstr(line, "Total Cycles:");
+                    if (tc) {
+                        size_t cyc = (size_t)strtoull(tc + 13, NULL, 10);
+                        if (cyc > 0) {
+                            rep->mca_est_cycles = cyc;
+                            snprintf(rep->mca_backend, sizeof(rep->mca_backend), "llvm-mca");
+                        }
+                    }
+                }
+                pclose(mfp);
+            }
         }
     }
     if (do_git) {
@@ -449,7 +497,9 @@ static int restore_univalent_struct(const char *in_path, const char *struct_name
 int cmd_slice_run(int argc, char **argv, bool json_mode) {
     const char *target_c = NULL, *target_struct = NULL, *shadow_out = NULL, *excavate_out = NULL, *restore_in = NULL, *ast_json = NULL;
     const char *emit_metal = NULL, *emit_wgsl = NULL;
-    bool use_ast = false, use_ir = false, use_git = false, audit_all = false;
+    const char *emit_ffi[8] = {0};
+    size_t emit_ffi_cnt = 0;
+    bool use_ast = false, use_ir = false, use_git = false, use_mca = false, audit_all = false;
     size_t struct_size = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -463,6 +513,7 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
         else if ((strcmp(argv[i], "--ast-json") == 0 && i + 1 < argc) || strncmp(argv[i], "--ast-json=", 11) == 0) {
             ast_json = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i]; use_ast = true;
         } else if (strcmp(argv[i], "--llvm-ir") == 0) use_ir = true;
+        else if (strcmp(argv[i], "--mca") == 0) use_mca = true;
         else if (strcmp(argv[i], "--git-diff") == 0) use_git = true;
         else if ((strcmp(argv[i], "--shadow") == 0 && i + 1 < argc) || strncmp(argv[i], "--shadow=", 9) == 0)
             shadow_out = (argv[i][8] == '=') ? argv[i] + 9 : argv[++i];
@@ -472,7 +523,10 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
             emit_metal = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
         else if ((strcmp(argv[i], "--emit-wgsl") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-wgsl=", 12) == 0)
             emit_wgsl = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
-        else if ((strcmp(argv[i], "--restore") == 0 && i + 1 < argc) || strncmp(argv[i], "--restore=", 10) == 0)
+        else if ((strcmp(argv[i], "--emit-ffi") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-ffi=", 11) == 0) {
+            const char *fp = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i];
+            if (emit_ffi_cnt < 8) emit_ffi[emit_ffi_cnt++] = fp;
+        } else if ((strcmp(argv[i], "--restore") == 0 && i + 1 < argc) || strncmp(argv[i], "--restore=", 10) == 0)
             restore_in = (argv[i][9] == '=') ? argv[i] + 10 : argv[++i];
         else if (argv[i][0] != '-') target_c = argv[i];
     }
@@ -486,11 +540,14 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
     if (parse_c_file(target_c, target_struct, struct_size, &rep) != 0) {
         fprintf(stderr, "Error: failed to parse %s\n", target_c); return 1;
     }
-    route_llvm_and_git(target_c, ast_json, use_ast, use_ir, use_git, &rep);
+    route_llvm_and_git(target_c, ast_json, use_ast, use_ir, use_git, use_mca, &rep);
     if (shadow_out && emit_shadow_tap(shadow_out, "flow_shadow") != 0) return 1;
     if (excavate_out && emit_excavated_skeleton(excavate_out, "flow_excavated") != 0) return 1;
     if (emit_metal && flowy_emit_gpu_shader(emit_metal, rep.struct_name, 73728, 57344, 16, false) != 0) return 1;
     if (emit_wgsl && flowy_emit_gpu_shader(emit_wgsl, rep.struct_name, 73728, 57344, 16, true) != 0) return 1;
+    for (size_t k = 0; k < emit_ffi_cnt; ++k) {
+        if (flowy_emit_ffi_view(emit_ffi[k], rep.struct_name, 73728, 57344, 16) != 0) return 1;
+    }
 
     if (json_mode) {
         flowy_json_start();
@@ -524,6 +581,12 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
             flowy_json_field_u64("ir_select_ops", rep.ir_select_ops, true); flowy_json_field_u64("ir_heap_calls", rep.ir_heap_calls, true);
             flowy_json_field_u64("ir_align64_ops", rep.ir_align64_ops, true);
         }
+        if (rep.mca_routed) {
+            flowy_json_field_str("mca_backend", rep.mca_backend, true);
+            flowy_json_field_u64("mca_instructions", rep.mca_instructions, true);
+            flowy_json_field_u64("mca_branches", rep.mca_branches, true);
+            flowy_json_field_u64("mca_est_cycles", rep.mca_est_cycles, true);
+        }
         if (rep.git_diff_routed) {
             flowy_json_field_u64("git_added_lines", rep.git_added_lines, true); flowy_json_field_u64("git_deleted_lines", rep.git_deleted_lines, true);
         }
@@ -543,12 +606,6 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
                        st->total_size, st->align, st->padding_bytes,
                        st->is_univalent ? "PASS: Univalent 64B" : "NON-64B");
             }
-            if (rep.llvm_ast_routed)
-                printf("  - [LLVM AST Digest] Records: %zu | Fields: %zu | Funcs: %zu | Calls: %zu\n", rep.ast_records, rep.ast_fields, rep.ast_funcs, rep.ast_calls);
-            if (rep.llvm_ir_routed)
-                printf("  - [LLVM IR Audit] FloatOps: %zu | InlineASM: %zu | Select: %zu | HeapCalls: %zu | Align64: %zu\n",
-                       rep.ir_float_ops, rep.ir_inline_asm, rep.ir_select_ops, rep.ir_heap_calls, rep.ir_align64_ops);
-            if (rep.git_diff_routed) printf("  - [Git Delta] +%zu / -%zu lines\n", rep.git_added_lines, rep.git_deleted_lines);
         } else {
             size_t active_ws = (rep.structs_univalent_64b > 0) ? (rep.structs_univalent_64b * 64) : rep.total_size;
             printf("=== FLOWY Structural Projection & 64B Univalence Audit ===\n"
@@ -558,13 +615,16 @@ int cmd_slice_run(int argc, char **argv, bool json_mode) {
                    target_c, rep.struct_name[0] ? rep.struct_name : "(anon)", rep.structs_univalent_64b, rep.structs_total,
                    rep.u_ext_count, rep.b_ext_count, rep.side_effect_count, rep.total_size, rep.align, rep.padding_bytes,
                    rep.is_univalent ? "PASS" : "FAIL", active_ws, rep.l1_budget_bytes, (double)active_ws * 100.0 / (double)rep.l1_budget_bytes);
-            if (rep.llvm_ast_routed)
-                printf("  - [LLVM AST Digest] Records: %zu | Fields: %zu | Funcs: %zu | Calls: %zu\n", rep.ast_records, rep.ast_fields, rep.ast_funcs, rep.ast_calls);
-            if (rep.llvm_ir_routed)
-                printf("  - [LLVM IR Audit] FloatOps: %zu | InlineASM: %zu | Select: %zu | HeapCalls: %zu | Align64: %zu\n",
-                       rep.ir_float_ops, rep.ir_inline_asm, rep.ir_select_ops, rep.ir_heap_calls, rep.ir_align64_ops);
-            if (rep.git_diff_routed) printf("  - [Git Delta] +%zu / -%zu lines\n", rep.git_added_lines, rep.git_deleted_lines);
         }
+        if (rep.llvm_ast_routed)
+            printf("  - [LLVM AST Digest] Records: %zu | Fields: %zu | Funcs: %zu | Calls: %zu\n", rep.ast_records, rep.ast_fields, rep.ast_funcs, rep.ast_calls);
+        if (rep.llvm_ir_routed)
+            printf("  - [LLVM IR Audit] FloatOps: %zu | InlineASM: %zu | Select: %zu | HeapCalls: %zu | Align64: %zu\n",
+                   rep.ir_float_ops, rep.ir_inline_asm, rep.ir_select_ops, rep.ir_heap_calls, rep.ir_align64_ops);
+        if (rep.mca_routed)
+            printf("  - [MCA Static Audit (%s)] Instructions: %zu | Branches: %zu | Est. Cycles: %zu\n",
+                   rep.mca_backend, rep.mca_instructions, rep.mca_branches, rep.mca_est_cycles);
+        if (rep.git_diff_routed) printf("  - [Git Delta] +%zu / -%zu lines\n", rep.git_added_lines, rep.git_deleted_lines);
     }
     return 0;
 }

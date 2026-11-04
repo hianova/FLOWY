@@ -39,6 +39,28 @@ _Static_assert(sizeof(FlowBusinessRoute64) == 64, "FlowBusinessRoute64 must be e
 _Static_assert(_Alignof(FlowBusinessRoute64) == 64, "FlowBusinessRoute64 must have 64-byte alignment");
 #endif
 
+#define FLOW_CORPUS_MAGIC 0x464C4F5743525053ULL
+
+/*
+ * Canonical 64-Byte Binary Flight-Recorder Corpus Record
+ * sizeof == 64 && _Alignof == 64, deterministic trajectory replay unit.
+ */
+typedef struct {
+    _Alignas(64) uint64_t magic;       /* 8B: FLOW_CORPUS_MAGIC ("FLOWCRPS") */
+    int64_t  input_a;                  /* 8B: Primary trajectory parameter a */
+    int64_t  input_b;                  /* 8B: Secondary trajectory parameter b */
+    int64_t  expected_out;             /* 8B: Recorded deterministic output */
+    uint64_t sieve_mask;               /* 8B: Recorded 10-bit hardware sieve mask */
+    uint64_t step_index;               /* 8B: Step index within trajectory */
+    uint64_t mode_hash;                /* 8B: FNV-1a hash of wind-tunnel mode */
+    uint64_t record_mac;               /* 8B: Integrity MAC over bytes [0..55] */
+} FlowCorpusRecord64;
+
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+_Static_assert(sizeof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 must be exactly 64 bytes");
+_Static_assert(_Alignof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 must have 64-byte alignment");
+#endif
+
 /* CLI Flags / Options common to FLOWY */
 typedef struct {
     bool json_mode;
@@ -55,6 +77,7 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode);
 int cmd_diff_run(int argc, char **argv, bool json_mode);
 int cmd_lean_run(int argc, char **argv, bool json_mode);
 int cmd_sieve_run(int argc, char **argv, bool json_mode);
+int cmd_init_run(int argc, char **argv, bool json_mode);
 
 /* JSON Helper Utilities */
 void flowy_json_start(void);
@@ -68,6 +91,10 @@ void flowy_json_field_hex64(const char *key, uint64_t val, bool comma);
 /* 64-Byte Univalent GPU Constant/Uniform Buffer Generator (Metal & WGSL) */
 int flowy_emit_gpu_shader(const char *path, const char *struct_name,
                           int64_t b_enter, int64_t b_exit, uint32_t qshift, bool is_wgsl);
+
+/* 64-Byte Zero-Copy FFI Memory View Generator (.py, .ts, .swift) */
+int flowy_emit_ffi_view(const char *path, const char *struct_name,
+                        int64_t b_enter, int64_t b_exit, uint32_t qshift);
 
 #ifdef __cplusplus
 }

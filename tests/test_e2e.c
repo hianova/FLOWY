@@ -150,6 +150,72 @@ int main(void) {
     assert(system("./build/flowy sieve --verify-trace 0x3FF,0x000 > /dev/null 2>&1") != 0);
     printf("  [PASS] Transitive Orphan-Def Audit, Multi-Line Def & Trace Validation Invariants\n");
 
-    printf("[E2E Test] All 8 integration & cross-layer univalence gates passed!\n");
+    /* 9. Verify --mca, --bench, 64B Binary Corpus Replay, Zero-Copy FFI Views & Project Scaffolder */
+    _Static_assert(sizeof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 size must be 64 bytes");
+    _Static_assert(_Alignof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 align must be 64 bytes");
+
+    FILE *sf = fopen("build/slice_test.json", "r");
+    assert(sf != NULL);
+    char sbuf[2048] = {0};
+    (void)fread(sbuf, 1, sizeof(sbuf) - 1, sf);
+    fclose(sf);
+    assert(strstr(sbuf, "\"mca_instructions\":") != NULL);
+    assert(strstr(sbuf, "\"mca_est_cycles\":") != NULL);
+
+    FILE *bf = fopen("build/diff_arith.json", "r");
+    assert(bf != NULL);
+    char bbuf[2048] = {0};
+    (void)fread(bbuf, 1, sizeof(bbuf) - 1, bf);
+    fclose(bf);
+    assert(strstr(bbuf, "\"bench_enabled\": true") != NULL);
+    assert(strstr(bbuf, "\"zero_kernel_page_faults\": true") != NULL);
+
+    FILE *cf = fopen("build/diff_corpus_replay.json", "r");
+    assert(cf != NULL);
+    char cbuf[2048] = {0};
+    (void)fread(cbuf, 1, sizeof(cbuf) - 1, cf);
+    fclose(cf);
+    assert(strstr(cbuf, "\"corpus_records\": 256") != NULL);
+    assert(strstr(cbuf, "\"failures\": 0") != NULL);
+
+    /* Corrupt a corpus byte and verify --corpus detects MAC failure */
+    FILE *bad_c = fopen("build/tmp_bad_corpus.bin", "wb");
+    assert(bad_c != NULL);
+    FlowCorpusRecord64 bad_rec;
+    memset(&bad_rec, 0, sizeof(bad_rec));
+    bad_rec.magic = FLOW_CORPUS_MAGIC;
+    bad_rec.record_mac = 0xDEADBEEF12345678ULL;
+    assert(fwrite(&bad_rec, sizeof(bad_rec), 1, bad_c) == 1);
+    fclose(bad_c);
+    assert(system("./build/flowy diff --corpus build/tmp_bad_corpus.bin > /dev/null 2>&1") != 0);
+
+    /* Verify --emit-ffi rejects unsupported extension and emits valid .py/.ts/.swift views */
+    assert(flowy_emit_ffi_view("build/tmp_invalid.bad", "FlowState64", 73728, 57344, 16) != 0);
+    FILE *ts_f = fopen("build/flow_state.ts", "r");
+    assert(ts_f != NULL);
+    char ts_buf[1024] = {0};
+    (void)fread(ts_buf, 1, sizeof(ts_buf) - 1, ts_f);
+    fclose(ts_f);
+    assert(strstr(ts_buf, "BYTE_LENGTH = 64") != NULL);
+
+    FILE *sw_f = fopen("build/flow_state.swift", "r");
+    assert(sw_f != NULL);
+    char sw_buf[1024] = {0};
+    (void)fread(sw_buf, 1, sizeof(sw_buf) - 1, sw_f);
+    fclose(sw_f);
+    assert(strstr(sw_buf, "@frozen") != NULL && strstr(sw_buf, "== 64") != NULL);
+
+    /* Verify scaffolded project from `flowy init` passes `flowy slice` and `flowy lean` */
+    assert(system("./build/flowy slice build/tmp_scaffold_proj/include/project_state.h --audit-all --json > build/tmp_init_slice.json") == 0);
+    assert(system("./build/flowy lean --from-lean build/tmp_scaffold_proj/lean/Spec.lean --json > build/tmp_init_lean.json") == 0);
+    FILE *ilf = fopen("build/tmp_init_lean.json", "r");
+    assert(ilf != NULL);
+    char ilbuf[1024] = {0};
+    (void)fread(ilbuf, 1, sizeof(ilbuf) - 1, ilf);
+    fclose(ilf);
+    assert(strstr(ilbuf, "\"orphan_defs\": 0") != NULL);
+    printf("  [PASS] MCA/Bench Gate, 64B Corpus Replay, Zero-Copy FFI Views & Project Scaffolder\n");
+
+    printf("[E2E Test] All 9 integration & cross-layer univalence gates passed!\n");
     return 0;
 }

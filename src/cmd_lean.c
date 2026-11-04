@@ -33,6 +33,7 @@ static void print_lean_help(void) {
            "    --compile-route <out.h>      Compile Lean-certified constants into FlowBusinessRoute64 header\n"
            "    --emit-metal <out.metal>     Emit 64B Univalent Metal Shading Language buffer header\n"
            "    --emit-wgsl <out.wgsl>       Emit 64B Univalent WebGPU Shading Language uniform buffer\n"
+           "    --emit-ffi <out.py|.ts|.swift> Emit 64B Zero-Copy FFI memory view\n"
            "    --json                       Deterministic JSON output for Agent consumption\n"
            "    -h, --help                   Print help information\n");
 }
@@ -349,6 +350,8 @@ static int compile_business_route_header(const char *out_path, uint64_t constrai
 int cmd_lean_run(int argc, char **argv, bool json_mode) {
     const char *from_lean = NULL, *emit_lean = NULL, *mint_abi = NULL, *compile_route = NULL;
     const char *emit_metal = NULL, *emit_wgsl = NULL;
+    const char *emit_ffi[8] = {0};
+    size_t emit_ffi_cnt = 0;
     bool verify = false, transition = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -367,7 +370,10 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
             emit_metal = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
         else if ((strcmp(argv[i], "--emit-wgsl") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-wgsl=", 12) == 0)
             emit_wgsl = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
-        else if (argv[i][0] != '-') from_lean = argv[i];
+        else if ((strcmp(argv[i], "--emit-ffi") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-ffi=", 11) == 0) {
+            const char *fp = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i];
+            if (emit_ffi_cnt < 8) emit_ffi[emit_ffi_cnt++] = fp;
+        } else if (argv[i][0] != '-') from_lean = argv[i];
     }
 
     const char *lean_file = from_lean ? from_lean : (emit_lean ? emit_lean : "lean/FlowContract.lean");
@@ -406,6 +412,9 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
     }
     if (emit_metal && flowy_emit_gpu_shader(emit_metal, ext.struct_name, ext.b_enter_q16, ext.b_exit_q16, ext.qshift, false) != 0) return 1;
     if (emit_wgsl && flowy_emit_gpu_shader(emit_wgsl, ext.struct_name, ext.b_enter_q16, ext.b_exit_q16, ext.qshift, true) != 0) return 1;
+    for (size_t k = 0; k < emit_ffi_cnt; ++k) {
+        if (flowy_emit_ffi_view(emit_ffi[k], ext.struct_name, ext.b_enter_q16, ext.b_exit_q16, ext.qshift) != 0) return 1;
+    }
 
     if (json_mode) {
         flowy_json_start();
