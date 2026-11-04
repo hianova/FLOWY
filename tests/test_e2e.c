@@ -116,6 +116,40 @@ int main(void) {
     assert(flow_reload_destroy(ctx) == 0);
     printf("  [PASS] Stage 3 Live QSBR Route Hot-Swap Invariant (0 Downtime, 0 Recompile)\n");
 
-    printf("[E2E Test] All 7 integration & cross-layer univalence gates passed!\n");
+    /* 8. Verify Transitive Orphan-Def Audit, Multi-Line Def Parsing & Trace Validation */
+    FILE *tf = fopen("build/tmp_orphan_chain.lean", "w");
+    assert(tf != NULL);
+    fprintf(tf, "def orphan_a : Nat := 10\n"
+                "def orphan_b : Nat := orphan_a + 20\n"
+                "def b_enter_q16 : Int\n"
+                "  := 81920\n"
+                "def covered_caller : Int := b_enter_q16\n"
+                "theorem thm_ok : covered_caller > 0 := by decide\n");
+    fclose(tf);
+    assert(system("./build/flowy lean --from-lean build/tmp_orphan_chain.lean --compile-route build/tmp_multiline_route.h --json > build/tmp_orphan.json") == 0);
+    FILE *jf = fopen("build/tmp_orphan.json", "r");
+    assert(jf != NULL);
+    char jbuf[1024] = {0};
+    (void)fread(jbuf, 1, sizeof(jbuf) - 1, jf);
+    fclose(jf);
+    assert(strstr(jbuf, "\"def_count\": 4") != NULL);
+    assert(strstr(jbuf, "\"covered_defs\": 2") != NULL);
+    assert(strstr(jbuf, "\"orphan_defs\": 2") != NULL);
+    FILE *rf = fopen("build/tmp_multiline_route.h", "r");
+    assert(rf != NULL);
+    char rbuf[1024] = {0};
+    (void)fread(rbuf, 1, sizeof(rbuf) - 1, rf);
+    fclose(rf);
+    assert(strstr(rbuf, ".b_enter_q16 = 81920LL") != NULL);
+
+    /* Verify --verify-trace rejects malformed hex, single step, trailing comma, and broken Kan step */
+    assert(system("./build/flowy sieve --verify-trace invalid_hex > /dev/null 2>&1") != 0);
+    assert(system("./build/flowy sieve --verify-trace 0x3FF,bad > /dev/null 2>&1") != 0);
+    assert(system("./build/flowy sieve --verify-trace 0x3FF,0x3FE, > /dev/null 2>&1") != 0);
+    assert(system("./build/flowy sieve --verify-trace 0x3FF > /dev/null 2>&1") != 0);
+    assert(system("./build/flowy sieve --verify-trace 0x3FF,0x000 > /dev/null 2>&1") != 0);
+    printf("  [PASS] Transitive Orphan-Def Audit, Multi-Line Def & Trace Validation Invariants\n");
+
+    printf("[E2E Test] All 8 integration & cross-layer univalence gates passed!\n");
     return 0;
 }

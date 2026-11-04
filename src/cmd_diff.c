@@ -144,7 +144,7 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
         }
         failures = qpoly_flips;
         invariant_status = (qpoly_flips == 0) ? "HOLD (0-Chatter Stability Verified)" : "CHATTERING";
-    } else if (strcmp(mode, "conservation") == 0 || strcmp(mode, "ricardian") == 0) {
+    } else if (strcmp(mode, "conservation") == 0) {
         DiffGovernorPoly thermal_poly;
         DiffGovernorPoly_init(&thermal_poly);
         thermal_poly.A[0][0] = 1;

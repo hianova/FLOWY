@@ -50,6 +50,7 @@ test: $(TARGET)
 	# 2. Subcommand: slice (64B Univalence Audit, --audit-all, LLVM AST/IR & Git routing, Shadow, Excavate, GPU buffers)
 	$(TARGET) slice src/flowy_cli.h --audit-struct FlowBusinessRoute64 --json > build/slice_route64.json
 	$(TARGET) slice src/flowy_cli.h --audit-all --emit-metal build/slice_route64.metal --emit-wgsl build/slice_route64.wgsl --json > build/slice_all.json
+	$(CC) -x c++ -std=c++14 -fsyntax-only build/slice_route64.metal
 	$(TARGET) slice src/flowy_cli.c --llvm-ast --llvm-ir --git-diff --json > build/slice_test.json
 	$(TARGET) slice src/flowy_cli.c --shadow build/tmp_shadow.c
 	$(CC) -std=c11 $(INCLUDES) -c build/tmp_shadow.c -o build/tmp_shadow.o
@@ -58,6 +59,7 @@ test: $(TARGET)
 	$(TARGET) slice build/tmp_excavated.c --restore build/tmp_excavated.c
 	# 3. Subcommand: qpoly (Inner-quantization, --auto-cegis & Governor synthesis + Metal/WGSL emission)
 	$(TARGET) qpoly --dim 1 --threshold 65536 --deadband 4096 --noise-floor 2048 --qshift-sweep --auto-cegis --emit-c build/tmp_governor.h --emit-metal build/tmp_governor.metal --emit-wgsl build/tmp_governor.wgsl --json > build/qpoly_test.json
+	$(CC) -x c++ -std=c++14 -fsyntax-only build/tmp_governor.metal
 	# 4. Subcommand: diff (5-mode algebraic wind tunnel + --auto-cegis: arith, tunnel, chatter, conservation, relativistic)
 	$(TARGET) diff --mode arith --trials 10000 --auto-cegis --json > build/diff_arith.json
 	$(TARGET) diff --mode tunnel --trials 10000 --auto-cegis --json > build/diff_tunnel.json
@@ -66,6 +68,7 @@ test: $(TARGET)
 	$(TARGET) diff --mode relativistic --trials 10000 --auto-cegis --json > build/diff_relativistic.json
 	# 5. Subcommand: lean (Formal proof generation, --transition, ABI mint, 64B struct synthesis, Route & GPU buffer compilation)
 	$(TARGET) lean --emit-lean lean/FlowContract.lean --transition --mint-abi build/flow_direct_unit_abi.h --compile-route build/flow_compiled_route.h --emit-metal build/flow_state.metal --emit-wgsl build/flow_state.wgsl --json > build/lean_test.json
+	$(CC) -x c++ -std=c++14 -fsyntax-only build/flow_state.metal
 	# 6. Subcommand: sieve (Boundary tag, Sieve pullback, Kan Homotopy, HIT Quotient, Wave64, Hex128 Capsule & --verify-trace)
 	$(TARGET) sieve --decode-tag 0x7FF8400010040000 --json > build/sieve_tag.json
 	$(TARGET) sieve --decode-sieve 0x3FF --json > build/sieve_mask.json
@@ -75,7 +78,7 @@ test: $(TARGET)
 	$(TARGET) sieve --check-qsbr --json > build/sieve_qsbr.json
 	$(TARGET) sieve --capsule-encode "FLOW_UNIVALENT_CAPSULE_PAYLOAD" --json > build/capsule_enc.json
 	$(TARGET) sieve --capsule-decode 464c4f575f554e4956414c454e545f43415053554c455f5041594c4f4144000000000000000000000000000000000000000000000000000079c33513c3dc78b6 --json > build/capsule_dec.json
-	$(TARGET) sieve --verify-trace 0x3FF,0x3FE --json > build/sieve_trace.json
+	$(TARGET) sieve --verify-trace 0x3FF,0x3FE,0x3FC,0x3FF --json > build/sieve_trace.json
 	# 7. End-to-end integration test runner
 	$(CC) $(CFLAGS) $(INCLUDES) tests/test_e2e.c src/flowy_cli.c -o build/test_e2e $(LDFLAGS)
 	./build/test_e2e

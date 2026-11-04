@@ -1,6 +1,6 @@
-# FLOWY (`v0.1.0`) — Resident Symbolic, Geometric & Diagnostic Companion CLI
+# FLOWY — Resident Symbolic, Geometric & Diagnostic Companion CLI
 
-> **`Lean 4`（形式化規格與狀態轉移 SSOT） ↔ `C11/C17`（64-Byte Cache-Line 同構 ABI 膠水與 GPU 常數緩衝） ↔ `LLVM`（`clang` AST / IR 降階審計） ↔ `FLOW v4`（90% Total ISA 全函數整數 ASM 基底）的常駐輕量投影與編譯橋樑。**
+> **`Lean 4`（形式化規格與狀態轉移 SSOT） ↔ `C11/C17`（64-Byte Cache-Line 同構 ABI 膠水與 GPU 常數緩衝） ↔ `LLVM`（`clang` AST / IR 降階審計） ↔ `FLOW`（90% Total ISA 全函數整數 ASM 基底）的常駐輕量投影與編譯橋樑。**
 
 ---
 
@@ -34,7 +34,7 @@
                                        │  flowy qpoly / flowy diff / flowy sieve
                                        ▼
   ┌──────────────────────────────────────────────────────────────────────────┐
-  │ 4. FLOW v4 Total ISA 全函數硬體基底 (B_64 — 90% Pure Integer ASM)        │
+  │ 4. FLOW Total ISA 全函數硬體基底 (B_64 — 90% Pure Integer ASM)           │
   │    • 帶硬體溢位捕捉算術 (adds/subs/cset vs)、128-bit Q16、遮罩環形記憶體 │
   │    • 純 Q16 2-Jet 二次世界線求根、雙閾值遲滯 QPoly、Wave64 POPCNT/CTZ    │
   └──────────────────────────────────────────────────────────────────────────┘
@@ -147,7 +147,7 @@ flowy sieve [OPTIONS]
 ## 3. 快速建置與自動化驗證閘門
 
 ```bash
-# 1. 編譯 FLOWY v0.1.0 (嚴格 C11, 0 Warnings)
+# 1. 編譯 FLOWY (嚴格 C11, 0 Warnings)
 make clean && make all
 
 # 2. 執行完整端到端測試套件 (涵蓋 5 大子命令、--audit-all、5 種風洞模式、--auto-cegis、GPU 緩衝生成、--verify-trace 與 QSBR 熱切換)

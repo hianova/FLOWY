@@ -237,12 +237,28 @@ int cmd_sieve_run(int argc, char **argv, bool json_mode) {
     }
 
     if (verify_trace) {
-        uint64_t masks[4] = { 0x3FFULL, 0x3FEULL, 0x3FCULL, 0x3FFULL };
+        uint64_t masks[64] = { 0x3FFULL, 0x3FEULL, 0x3FCULL, 0x3FFULL };
         size_t steps = 4;
         if (trace_spec && trace_spec[0]) {
-            uint64_t m0 = 0, m1 = 0;
-            if (sscanf(trace_spec, "%" SCNx64 ",%" SCNx64, &m0, &m1) == 2) {
-                masks[0] = m0; masks[1] = m1; steps = 2;
+            steps = 0;
+            const char *p = trace_spec;
+            while (*p && steps < 64) {
+                char *endp = NULL;
+                uint64_t v = (uint64_t)strtoull(p, &endp, 0);
+                if (endp == p || (*endp != '\0' && *endp != ',')) {
+                    fprintf(stderr, "Error: malformed trace mask in --verify-trace: %s\n", trace_spec);
+                    return 1;
+                }
+                masks[steps++] = v;
+                p = (*endp == ',') ? (endp + 1) : endp;
+                if (*endp == ',' && *p == '\0') {
+                    fprintf(stderr, "Error: trailing comma in --verify-trace: %s\n", trace_spec);
+                    return 1;
+                }
+            }
+            if (steps < 2) {
+                fprintf(stderr, "Error: --verify-trace requires at least 2 comma-separated state masks.\n");
+                return 1;
             }
         }
         uint64_t chain_mac = FLOW_GOLDEN_RATIO_64;

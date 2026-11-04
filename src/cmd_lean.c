@@ -9,8 +9,10 @@
 typedef struct {
     char struct_name[64];
     char field_names[8][48];
-    char def_names[32][48];
-    bool def_covered[32];
+    char def_names[64][48];
+    uint64_t def_deps[64];
+    bool def_covered[64];
+    int cur_def_idx;
     size_t field_count, theorem_count, def_count, covered_defs, orphan_defs;
     bool has_sorry, in_theorem;
     uint32_t route_op_mask, qshift;
@@ -76,9 +78,10 @@ static int generate_lean_source(const char *lean_path) {
     return 0;
 }
 
-static void mark_referenced_defs(const char *haystack, LeanSpecExtract *ext) {
+static void mark_referenced_defs(const char *haystack, LeanSpecExtract *ext, int caller_def_idx) {
     if (!haystack) return;
     for (size_t j = 0; j < ext->def_count; ++j) {
+        if ((int)j == caller_def_idx) continue;
         const char *dn = ext->def_names[j];
         size_t dlen = strlen(dn);
         if (dlen == 0) continue;
@@ -86,10 +89,26 @@ static void mark_referenced_defs(const char *haystack, LeanSpecExtract *ext) {
         while ((p = strstr(p, dn)) != NULL) {
             bool prev_ok = (p == haystack) || (!isalnum((unsigned char)p[-1]) && p[-1] != '_');
             bool next_ok = (!isalnum((unsigned char)p[dlen]) && p[dlen] != '_');
-            if (prev_ok && next_ok) { ext->def_covered[j] = true; break; }
+            if (prev_ok && next_ok) {
+                if (caller_def_idx >= 0 && caller_def_idx < 64) ext->def_deps[caller_def_idx] |= (1ULL << j);
+                else ext->def_covered[j] = true;
+                break;
+            }
             p += dlen;
         }
     }
+}
+
+static void extract_def_constant(const char *dname, const char *v, LeanSpecExtract *ext) {
+    while (*v && isspace((unsigned char)*v)) v++;
+    if (!*v) return;
+    if (strcmp(dname, "route_op_mask") == 0) ext->route_op_mask = (uint32_t)strtoul(v, NULL, 0);
+    else if (strcmp(dname, "b_enter_q16") == 0) ext->b_enter_q16 = strtoll(v, NULL, 0);
+    else if (strcmp(dname, "b_exit_q16") == 0) ext->b_exit_q16 = strtoll(v, NULL, 0);
+    else if (strcmp(dname, "req_mask") == 0) ext->req_mask = (uint64_t)strtoull(v, NULL, 0);
+    else if (strcmp(dname, "req_values") == 0) ext->req_values = (uint64_t)strtoull(v, NULL, 0);
+    else if (strcmp(dname, "weight_q16") == 0) ext->weight_q16 = (int32_t)strtol(v, NULL, 0);
+    else if (strcmp(dname, "qshift") == 0) ext->qshift = (uint32_t)strtoul(v, NULL, 0);
 }
 
 static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract *ext) {
@@ -97,6 +116,7 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
     while (*t && isspace((unsigned char)*t)) t++;
     if (strncmp(t, "structure ", 10) == 0) {
         ext->in_theorem = false;
+        ext->cur_def_idx = -1;
         if (!ext->struct_name[0] && sscanf(t + 10, "%63[A-Za-z0-9_]", ext->struct_name) == 1) *in_struct = true;
     } else if (*in_struct) {
         if (strncmp(t, "deriving ", 9) == 0 || (t == line && *t != '\0')) *in_struct = false;
@@ -109,38 +129,43 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
     }
     if (strncmp(t, "theorem ", 8) == 0 || strncmp(t, "lemma ", 6) == 0) {
         ext->in_theorem = true;
-        mark_referenced_defs(t, ext);
+        ext->cur_def_idx = -1;
+        mark_referenced_defs(t, ext, -1);
     } else if (strncmp(t, "def ", 4) == 0 || strncmp(t, "abbrev ", 7) == 0) {
         ext->in_theorem = false;
         size_t kw = (strncmp(t, "def ", 4) == 0) ? 4 : 7;
         char dname[64] = {0};
         const char *assign = strstr(t, ":=");
         if (sscanf(t + kw, "%63[A-Za-z0-9_]", dname) == 1) {
-            if (assign) mark_referenced_defs(assign + 2, ext);
-            if (ext->def_count < 32) {
-                snprintf(ext->def_names[ext->def_count], 48, "%s", dname);
-                ext->def_covered[ext->def_count] = false;
-                ext->def_count++;
+            int idx = -1;
+            if (ext->def_count < 64) {
+                idx = (int)ext->def_count++;
+                snprintf(ext->def_names[idx], 48, "%s", dname);
+                ext->def_covered[idx] = false;
+                ext->def_deps[idx] = 0ULL;
             }
+            ext->cur_def_idx = idx;
             if (assign) {
-                const char *v = assign + 2;
-                while (*v && isspace((unsigned char)*v)) v++;
-                if (strcmp(dname, "route_op_mask") == 0) ext->route_op_mask = (uint32_t)strtoul(v, NULL, 0);
-                else if (strcmp(dname, "b_enter_q16") == 0) ext->b_enter_q16 = strtoll(v, NULL, 0);
-                else if (strcmp(dname, "b_exit_q16") == 0) ext->b_exit_q16 = strtoll(v, NULL, 0);
-                else if (strcmp(dname, "req_mask") == 0) ext->req_mask = (uint64_t)strtoull(v, NULL, 0);
-                else if (strcmp(dname, "req_values") == 0) ext->req_values = (uint64_t)strtoull(v, NULL, 0);
-                else if (strcmp(dname, "weight_q16") == 0) ext->weight_q16 = (int32_t)strtol(v, NULL, 0);
-                else if (strcmp(dname, "qshift") == 0) ext->qshift = (uint32_t)strtoul(v, NULL, 0);
+                mark_referenced_defs(assign + 2, ext, idx);
+                extract_def_constant(dname, assign + 2, ext);
             }
         }
     } else if (ext->in_theorem && *t != '\0') {
-        mark_referenced_defs(t, ext);
+        mark_referenced_defs(t, ext, -1);
+    } else if (ext->cur_def_idx >= 0 && *t != '\0') {
+        const char *assign = strstr(t, ":=");
+        if (assign) {
+            mark_referenced_defs(assign + 2, ext, ext->cur_def_idx);
+            extract_def_constant(ext->def_names[ext->cur_def_idx], assign + 2, ext);
+        } else {
+            mark_referenced_defs(t, ext, ext->cur_def_idx);
+        }
     }
 }
 
 static int parse_lean_spec_stream(const char *path, LeanSpecExtract *ext, uint64_t *out_hash) {
     memset(ext, 0, sizeof(*ext));
+    ext->cur_def_idx = -1;
     ext->route_op_mask = FLOW_ROUTE_QPOLY | FLOW_ROUTE_JET2 | FLOW_ROUTE_QARITH;
     ext->b_enter_q16 = 73728;
     ext->b_exit_q16 = 57344;
@@ -236,6 +261,20 @@ static int parse_lean_spec_stream(const char *path, LeanSpecExtract *ext, uint64
         process_lean_line(line, &in_struct, ext);
     }
     fclose(f);
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t i = 0; i < ext->def_count; ++i) {
+            if (!ext->def_covered[i]) continue;
+            uint64_t deps = ext->def_deps[i];
+            for (size_t k = 0; k < ext->def_count; ++k) {
+                if ((deps & (1ULL << k)) && !ext->def_covered[k]) {
+                    ext->def_covered[k] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
     for (size_t j = 0; j < ext->def_count; ++j) {
         if (ext->def_covered[j]) ext->covered_defs++;
         else ext->orphan_defs++;

@@ -81,7 +81,8 @@ static size_t get_base_type_size(const char *decl, size_t *out_align, const Pars
     if (strchr(decl, '(') && strchr(decl, '*')) { sz = 8; al = 8; }
     else if (strstr(decl, "FlowResultU64") || strstr(decl, "FlowBmfTernary64")) { sz = 16; al = 8; }
     else if (strstr(decl, "FlowJet2") || strstr(decl, "FlowQJet2") || strstr(decl, "FlowJetScalar2")) { sz = 24; al = 8; }
-    else if (strstr(decl, "RicardianStateV4") || strstr(decl, "64 ") || strstr(decl, "64\t")) { sz = 64; al = 64; }
+    else if (strstr(decl, "StateV4") || strstr(decl, "State64") || strstr(decl, "Route64") ||
+             strstr(decl, "64 ") || strstr(decl, "64\t")) { sz = 64; al = 64; }
     else if (strstr(decl, "uint64_t") || strstr(decl, "int64_t") || strstr(decl, "double") ||
              strstr(decl, "size_t") || strstr(decl, "uintptr_t") || strstr(decl, "intptr_t") || strchr(decl, '*')) { sz = 8; al = 8; }
     else if (strstr(decl, "uint32_t") || strstr(decl, "int32_t") || strstr(decl, "float") ||
@@ -95,7 +96,7 @@ static size_t get_base_type_size(const char *decl, size_t *out_align, const Pars
 static bool has_align64_attr(const char *s) {
     return strstr(s, "_Alignas(64") || strstr(s, "aligned(64") || strstr(s, "aligned (64") ||
            strstr(s, "FLOW_CACHE_ALIGNED") || strstr(s, "FLOW_HW_CACHE_LINE_BYTES") ||
-           strstr(s, "RicardianStateV4") || strstr(s, "FlowBusinessRoute64");
+           strstr(s, "StateV4") || strstr(s, "State64") || strstr(s, "FlowBusinessRoute64");
 }
 
 static void add_field_decl_to_layout(const char *stmt, const char *file_buf, const ParsedStructInfo *known,
@@ -339,13 +340,19 @@ static int parse_c_file(const char *filepath, const char *target_struct, size_t 
 }
 
 static void route_llvm_and_git(const char *target_c, const char *ast_json, bool do_ast, bool do_ir, bool do_git, SliceAuditReport *rep) {
-    char cmd[1024], line[1024];
+    char cmd[1024], line[1024], tdir[256] = ".";
+    const char *slash = target_c ? strrchr(target_c, '/') : NULL;
+    if (slash && (size_t)(slash - target_c) < sizeof(tdir)) {
+        memcpy(tdir, target_c, (size_t)(slash - target_c));
+        tdir[slash - target_c] = '\0';
+    }
     if (do_ast) {
         rep->llvm_ast_routed = true;
         FILE *fp = ast_json ? fopen(ast_json, "r") : NULL;
         if (!ast_json) {
             snprintf(cmd, sizeof(cmd), "cc -Xclang -ast-dump -fsyntax-only -fno-color-diagnostics "
-                     "-I./src -I../FLOW/src -I../FLOW/build -I../Ricardian/build -I../flow_game/include \"%s\" 2>/dev/null", target_c);
+                     "-I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build \"%s\" 2>/dev/null",
+                     tdir, tdir, tdir, target_c);
             fp = popen(cmd, "r");
         }
         if (fp) {
@@ -361,7 +368,8 @@ static void route_llvm_and_git(const char *target_c, const char *ast_json, bool 
     if (do_ir) {
         rep->llvm_ir_routed = true;
         snprintf(cmd, sizeof(cmd), "cc -x c -std=c11 -O2 -S -emit-llvm "
-                 "-I./src -I../FLOW/src -I../FLOW/build -I../Ricardian/build -I../flow_game/include \"%s\" -o - 2>/dev/null", target_c);
+                 "-I./src -I./build -I\"%s\" -I\"%s/../include\" -I\"%s/../build\" -I../FLOW/src -I../FLOW/build \"%s\" -o - 2>/dev/null",
+                 tdir, tdir, tdir, target_c);
         FILE *fp = popen(cmd, "r");
         if (fp) {
             while (fgets(line, sizeof(line), fp)) {
