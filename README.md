@@ -79,10 +79,11 @@ flowy slice <target.c|target.h> [OPTIONS]
 flowy lean [OPTIONS] [spec.lean]
 ```
 
-- **`O(1)` 記憶體 64KB 分塊串流解析器（`--from-lean <in.lean>`）**：
+- **`O(1)` 記憶體 64KB 分塊串流解析與規格覆蓋率審計（`--from-lean <in.lean>`）**：
   - 零動態記憶體配置（`0 malloc/calloc`），精確處理單行 `--`、巢狀 `/- ... -/` 註解與字串常值，提取 `structure <Name> where` 欄位、統計 `theorem`/`lemma` 數量、解析路由常數，並強制攔截任何包含 `sorry` 或 `sorryAx` 的不完整證明。
+  - **孤兒定義與漏寫定理偵測（Specification Gap Audit）**：自動追蹤每個 `def` / `abbrev` 定義是否至少被一項 `theorem` / `lemma` 所涵蓋，即時輸出 `def_count`、`covered_defs` 與 `orphan_defs`（未受任何形式化定理約束的孤兒規格定義數量），防止「寫了業務定義卻漏寫不變量定理」的規格漏洞。
 - **自包含形式化證明生成與內核驗證（`--emit-lean <out.lean>` / `--verify` / `--transition`）**：
-  - `--emit-lean <out.lean>`：生成涵蓋三大支柱的標準 Lean 4 模組（`BitVec 64` Dietz 溢位治癒、透視視差安全切片不等式 `sliceSafe`、整數格點守恆與遲滯序關係）。
+  - `--emit-lean <out.lean>`：生成涵蓋三大支柱與完整定義覆蓋（`orphan_defs == 0`）的標準 Lean 4 模組（`BitVec 64` Dietz 溢位治癒、透視視差安全切片不等式 `sliceSafe`、整數格點守恆與遲滯序關係）。
   - `--transition`：合成並驗證狀態轉移步進不變量（$S_t \to S_{t+1}$ 總量守恆定理 `transition_step_conserved`），並在生成的 C ABI 標頭中注入 `flow_verify_state_transition` 轉移驗證內聯函數。
   - `--verify`：直接呼叫官方 `lean` 核心驗證所有定理（確保 `0 sorryAx`）。
 - **確定性 64-Byte ABI 與業務路由鑄造**：
@@ -108,7 +109,7 @@ flowy qpoly [OPTIONS] [spec]
 
 ---
 
-### 4️⃣ `flowy diff` — 五模式雙域代數風洞（$\mathcal{M}_{\text{Ideal}} \leftrightarrow \mathcal{B}_{64}$）與自動 CEGIS 合成神諭
+### 4️⃣ `flowy diff` — 五模式雙域代數風洞（$\mathcal{M}_{\text{Ideal}} \leftrightarrow \mathcal{B}_{64}$）、空真偵測與自動 CEGIS 合成神諭
 
 ```bash
 flowy diff --mode <arith|tunnel|chatter|conservation|relativistic> [OPTIONS]
@@ -120,6 +121,8 @@ flowy diff --mode <arith|tunnel|chatter|conservation|relativistic> [OPTIONS]
   3. `--mode chatter`：對照單一閾值在感測器高頻雜訊下的劇烈翻轉與 `FlowQPoly` 雙閾值遲滯閘門（死區內 **0 次抖動**）。
   4. `--mode conservation`：驗證整數格點零和分潤守恆（70/30 分拆無捨入洩漏）、恆定乘積儲備池底線保護（$\ge 1$）與熱力學遲滯帶穩定性。
   5. `--mode relativistic`：驗證純整數 `Q16` 勞倫茲因子（Lorentz $\gamma = 1/\sqrt{1-\beta^2} \ge 1.0$）因果下界、相對論都卜勒對稱性與 64 槽黃金比例時間輪（Timing Wheel）散列均勻度。
+- **空真防護與後置條件餘裕度探測（Vacuity & Slack Probing）**：
+  - 在所有風洞模式下自動統計前置條件激發次數與比率（`precond_activations`、`precond_rate_bps`）、標記空真警報（`vacuous_guard`，防止因前置條件永假而導致定理空真通過），並追蹤全試驗中的最小後置條件安全餘裕（`min_postcond_slack`）。
 - **自動反例導引歸納合成（`--auto-cegis`）**：
   - 啟用 `--auto-cegis` 時，針對風洞捕獲的邊界反例自動執行迭代式參數收斂迴圈，合成消除異常所需的最小安全死區（`synthesized_deadband`）與定點精度（`synthesized_qshift`）。
 
@@ -153,3 +156,5 @@ make test
 # 3. 執行官方 Lean 4 內核形式化證明與狀態轉移驗證 (0 sorryAx)
 make verify-lean
 ```
+
+MIT licence

@@ -51,8 +51,8 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
     }
 
     uint64_t prng = seed;
-    size_t failures = 0, naive_anomalies = 0;
-    int64_t witness_x = 0, witness_y = 0;
+    size_t failures = 0, naive_anomalies = 0, precond_activations = 0;
+    int64_t witness_x = 0, witness_y = 0, min_postcond_slack = INT64_MAX;
     const char *invariant_status = "HOLD";
 
     if (strcmp(mode, "arith") == 0) {
@@ -71,12 +71,15 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
             }
 
             int64_t q_a = (a % 1000) * FLOW_Q16_ONE, q_b = ((b % 900) + 100) * FLOW_Q16_ONE;
+            if (q_b != 0) precond_activations++;
             uint64_t m_sieve = FLOW_ASM_SIEVE_ALL_SOUND, d_sieve = FLOW_ASM_SIEVE_ALL_SOUND;
             (void)flow_asm_qmul_shift16_i64(q_a, q_b, &m_sieve);
             (void)flow_asm_qdiv_shift16_i64(q_a, q_b, &d_sieve);
 
             int64_t total = (int64_t)(flow_prng_next(&prng) % 100000), fee = (total * 500) >> 16;
-            if (fee + (total - fee) != total) {
+            int64_t slack = (fee + (total - fee)) - total;
+            if (slack < min_postcond_slack) min_postcond_slack = slack;
+            if (slack != 0) {
                 failures++; witness_x = total; invariant_status = "VIOLATED"; break;
             }
         }
@@ -88,6 +91,7 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
             int64_t cur_obs_w = obs_width + (int64_t)(flow_prng_next(&prng) % 3);
             int64_t start = (int64_t)(flow_prng_next(&prng) % 20), end = start + cur_step, obs_start = start + 3;
 
+            if (start < obs_start && end > obs_start) precond_activations++;
             /* Discrete endpoint sampling misses when end jumps past [obs_start, obs_start + cur_obs_w] */
             if (start < obs_start && end > obs_start + cur_obs_w) {
                 naive_anomalies++;
@@ -98,6 +102,8 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
             int64_t t_hit = 0;
             if (!flow_jet2_solve_root(rel, FLOW_Q16_ONE, &t_hit)) {
                 flow_jet_misses++; witness_x = cur_step; witness_y = cur_obs_w;
+            } else if (t_hit < min_postcond_slack) {
+                min_postcond_slack = t_hit;
             }
 
             FlowJet2 next_jet = flow_jet2_make(end * FLOW_Q16_ONE, cur_step * FLOW_Q16_ONE, 0);
@@ -121,6 +127,9 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
         for (size_t i = 0; i < trials; ++i) {
             int64_t delta = (int64_t)(flow_prng_next(&prng) % (uint64_t)(2 * amp + 1)) - amp;
             int64_t val = nominal_thresh + delta;
+            if (delta != 0) precond_activations++;
+            int64_t margin = deadband - (delta >= 0 ? delta : -delta);
+            if (margin < min_postcond_slack) min_postcond_slack = margin;
             bool cur_naive_above = (val > nominal_thresh);
             if (i > 0 && cur_naive_above != prev_naive_above) naive_anomalies++;
             prev_naive_above = cur_naive_above;
@@ -147,6 +156,7 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
             uint64_t val = (flow_prng_next(&prng) % 1000000ULL) + 100ULL;
             uint64_t rate_bps = (flow_prng_next(&prng) % 1000ULL) + 10ULL;
             uint64_t tax = (val * rate_bps) / 10000ULL;
+            if (tax > 0) precond_activations++;
             uint64_t div = (tax * 7000ULL) / 10000ULL;
             uint64_t burn = tax - div;
             uint64_t sieve = FLOW_ASM_SIEVE_ALL_SOUND;
@@ -162,6 +172,8 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
             uint64_t eff_in = amt_in * 9970ULL;
             uint64_t next_out = (r_in * r_out * 10000ULL) / (r_in * 10000ULL + eff_in);
             if (next_out == 0ULL) { naive_anomalies++; next_out = 1ULL; }
+            int64_t floor_slack = (int64_t)next_out - 1;
+            if (floor_slack < min_postcond_slack) min_postcond_slack = floor_slack;
             if (next_out < 1ULL) { failures++; break; }
 
             /* 3. Thermal 800K/760K hysteresis stability in [765K, 795K] band */
@@ -204,12 +216,15 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
             if (one_minus_beta2 <= 0) {
                 failures++; witness_x = beta_q16; break;
             }
+            precond_activations++;
             FlowResultU64 sqrt_res = flow_asm_qsqrt_shift16_i64(one_minus_beta2, &sieve);
             if (flow_result_u64_is_boundary(sqrt_res) || sqrt_res.value == 0) {
                 failures++; witness_x = beta_q16; break;
             }
             int64_t denom_q16 = (int64_t)sqrt_res.value;
             int64_t gamma_q16 = ((int64_t)FLOW_Q16_ONE << 16) / denom_q16;
+            int64_t c_slack = gamma_q16 - FLOW_Q16_ONE;
+            if (c_slack < min_postcond_slack) min_postcond_slack = c_slack;
 
             /* Causal invariant: gamma >= 1.0 (65536 in Q16) */
             if (gamma_q16 < FLOW_Q16_ONE) {
@@ -231,6 +246,10 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
         return 1;
     }
 
+    if (min_postcond_slack == INT64_MAX) min_postcond_slack = 0;
+    uint64_t precond_rate_bps = (trials > 0) ? (uint64_t)((precond_activations * 10000ULL) / trials) : 0ULL;
+    bool vacuous_guard = (precond_activations == 0);
+
     size_t cegis_iters = 0;
     int64_t synth_deadband = (noise_amp > 0) ? (noise_amp * 2) : 1000;
     uint32_t synth_qshift = 16;
@@ -248,6 +267,10 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
         flowy_json_start();
         flowy_json_field_str("mode", mode, true); flowy_json_field_u64("trials", trials, true);
         flowy_json_field_u64("naive_anomalies", naive_anomalies, true); flowy_json_field_u64("failures", failures, true);
+        flowy_json_field_u64("precond_activations", precond_activations, true);
+        flowy_json_field_u64("precond_rate_bps", precond_rate_bps, true);
+        flowy_json_field_i64("min_postcond_slack", min_postcond_slack, true);
+        flowy_json_field_bool("vacuous_guard", vacuous_guard, true);
         flowy_json_field_str("invariant_status", invariant_status, true);
         if (auto_cegis) {
             flowy_json_field_bool("auto_cegis", true, true);
@@ -260,8 +283,11 @@ int cmd_diff_run(int argc, char **argv, bool json_mode) {
     } else {
         printf("=== FLOWY Dual-Domain Algebraic Wind Tunnel & CEGIS Oracle ===\n"
                "Mode               : %s\nTrials Executed    : %zu\nNaive Anomalies    : %zu\n"
-               "FLOW Failures      : %zu\nInvariant Status   : %s\n",
-               mode, trials, naive_anomalies, failures, invariant_status);
+               "FLOW Failures      : %zu\nPrecond Activation : %zu / %zu (%.2f%%, Vacuous: %s)\n"
+               "Min Postcond Slack : %" PRId64 "\nInvariant Status   : %s\n",
+               mode, trials, naive_anomalies, failures,
+               precond_activations, trials, (double)precond_rate_bps / 100.0,
+               vacuous_guard ? "YES [WARNING]" : "NO", min_postcond_slack, invariant_status);
         if (auto_cegis)
             printf("CEGIS Synthesis    : Converged in %zu iterations (deadband=%" PRId64 ", Q%u)\n",
                    cegis_iters, synth_deadband, synth_qshift);

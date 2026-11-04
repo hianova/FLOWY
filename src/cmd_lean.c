@@ -9,8 +9,10 @@
 typedef struct {
     char struct_name[64];
     char field_names[8][48];
-    size_t field_count, theorem_count;
-    bool has_sorry;
+    char def_names[32][48];
+    bool def_covered[32];
+    size_t field_count, theorem_count, def_count, covered_defs, orphan_defs;
+    bool has_sorry, in_theorem;
     uint32_t route_op_mask, qshift;
     int64_t b_enter_q16, b_exit_q16;
     uint64_t req_mask, req_values;
@@ -68,16 +70,34 @@ static int generate_lean_source(const char *lean_path) {
                "theorem split_70_30_conservation (tax : Nat) : (tax * 7000) / 10000 + (tax - (tax * 7000) / 10000) = tax := by omega\n"
                "theorem anti_tunneling_swept_invariant (a b L : Int) (h : L >= (b - a) + 2) : L > (b - a) := by omega\n"
                "theorem hysteresis_deadband_well_ordered : b_exit_q16 < b_enter_q16 := by decide\n"
+               "theorem route_config_well_formed : route_op_mask > 0 ∧ qshift = 16 ∧ weight_q16 > 0 ∧ (req_values &&& req_mask) = req_values := by decide\n"
                "theorem transition_step_conserved (s0 delta : Nat) (h : delta <= s0) : (s0 - delta) + delta = s0 := by omega\n");
     fclose(f);
     return 0;
 }
 
+static void mark_referenced_defs(const char *haystack, LeanSpecExtract *ext) {
+    if (!haystack) return;
+    for (size_t j = 0; j < ext->def_count; ++j) {
+        const char *dn = ext->def_names[j];
+        size_t dlen = strlen(dn);
+        if (dlen == 0) continue;
+        const char *p = haystack;
+        while ((p = strstr(p, dn)) != NULL) {
+            bool prev_ok = (p == haystack) || (!isalnum((unsigned char)p[-1]) && p[-1] != '_');
+            bool next_ok = (!isalnum((unsigned char)p[dlen]) && p[dlen] != '_');
+            if (prev_ok && next_ok) { ext->def_covered[j] = true; break; }
+            p += dlen;
+        }
+    }
+}
+
 static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract *ext) {
     const char *t = line;
     while (*t && isspace((unsigned char)*t)) t++;
-    if (strncmp(t, "structure ", 10) == 0 && !ext->struct_name[0]) {
-        if (sscanf(t + 10, "%63[A-Za-z0-9_]", ext->struct_name) == 1) *in_struct = true;
+    if (strncmp(t, "structure ", 10) == 0) {
+        ext->in_theorem = false;
+        if (!ext->struct_name[0] && sscanf(t + 10, "%63[A-Za-z0-9_]", ext->struct_name) == 1) *in_struct = true;
     } else if (*in_struct) {
         if (strncmp(t, "deriving ", 9) == 0 || (t == line && *t != '\0')) *in_struct = false;
         else if (strchr(t, ':') && ext->field_count < 8) {
@@ -87,20 +107,35 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
                 snprintf(ext->field_names[ext->field_count++], 48, "%s", fname);
         }
     }
-    if (strncmp(t, "def ", 4) == 0) {
+    if (strncmp(t, "theorem ", 8) == 0 || strncmp(t, "lemma ", 6) == 0) {
+        ext->in_theorem = true;
+        mark_referenced_defs(t, ext);
+    } else if (strncmp(t, "def ", 4) == 0 || strncmp(t, "abbrev ", 7) == 0) {
+        ext->in_theorem = false;
+        size_t kw = (strncmp(t, "def ", 4) == 0) ? 4 : 7;
         char dname[64] = {0};
         const char *assign = strstr(t, ":=");
-        if (assign && sscanf(t + 4, "%63[A-Za-z0-9_]", dname) == 1) {
-            const char *v = assign + 2;
-            while (*v && isspace((unsigned char)*v)) v++;
-            if (strcmp(dname, "route_op_mask") == 0) ext->route_op_mask = (uint32_t)strtoul(v, NULL, 0);
-            else if (strcmp(dname, "b_enter_q16") == 0) ext->b_enter_q16 = strtoll(v, NULL, 0);
-            else if (strcmp(dname, "b_exit_q16") == 0) ext->b_exit_q16 = strtoll(v, NULL, 0);
-            else if (strcmp(dname, "req_mask") == 0) ext->req_mask = (uint64_t)strtoull(v, NULL, 0);
-            else if (strcmp(dname, "req_values") == 0) ext->req_values = (uint64_t)strtoull(v, NULL, 0);
-            else if (strcmp(dname, "weight_q16") == 0) ext->weight_q16 = (int32_t)strtol(v, NULL, 0);
-            else if (strcmp(dname, "qshift") == 0) ext->qshift = (uint32_t)strtoul(v, NULL, 0);
+        if (sscanf(t + kw, "%63[A-Za-z0-9_]", dname) == 1) {
+            if (assign) mark_referenced_defs(assign + 2, ext);
+            if (ext->def_count < 32) {
+                snprintf(ext->def_names[ext->def_count], 48, "%s", dname);
+                ext->def_covered[ext->def_count] = false;
+                ext->def_count++;
+            }
+            if (assign) {
+                const char *v = assign + 2;
+                while (*v && isspace((unsigned char)*v)) v++;
+                if (strcmp(dname, "route_op_mask") == 0) ext->route_op_mask = (uint32_t)strtoul(v, NULL, 0);
+                else if (strcmp(dname, "b_enter_q16") == 0) ext->b_enter_q16 = strtoll(v, NULL, 0);
+                else if (strcmp(dname, "b_exit_q16") == 0) ext->b_exit_q16 = strtoll(v, NULL, 0);
+                else if (strcmp(dname, "req_mask") == 0) ext->req_mask = (uint64_t)strtoull(v, NULL, 0);
+                else if (strcmp(dname, "req_values") == 0) ext->req_values = (uint64_t)strtoull(v, NULL, 0);
+                else if (strcmp(dname, "weight_q16") == 0) ext->weight_q16 = (int32_t)strtol(v, NULL, 0);
+                else if (strcmp(dname, "qshift") == 0) ext->qshift = (uint32_t)strtoul(v, NULL, 0);
+            }
         }
+    } else if (ext->in_theorem && *t != '\0') {
+        mark_referenced_defs(t, ext);
     }
 }
 
@@ -201,6 +236,10 @@ static int parse_lean_spec_stream(const char *path, LeanSpecExtract *ext, uint64
         process_lean_line(line, &in_struct, ext);
     }
     fclose(f);
+    for (size_t j = 0; j < ext->def_count; ++j) {
+        if (ext->def_covered[j]) ext->covered_defs++;
+        else ext->orphan_defs++;
+    }
     if (out_hash) *out_hash = h;
     return 0;
 }
@@ -334,6 +373,9 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
         flowy_json_field_str("lean_file", lean_file, true);
         flowy_json_field_str("extracted_structure", ext.struct_name[0] ? ext.struct_name : "none", true);
         flowy_json_field_u64("extracted_fields", ext.field_count, true); flowy_json_field_u64("theorem_count", ext.theorem_count, true);
+        flowy_json_field_u64("def_count", ext.def_count, true);
+        flowy_json_field_u64("covered_defs", ext.covered_defs, true);
+        flowy_json_field_u64("orphan_defs", ext.orphan_defs, true);
         flowy_json_field_bool("kernel_verified", kernel_pass, true); flowy_json_field_u64("sorry_axioms", sorry_axioms, true);
         if (transition) flowy_json_field_bool("transition_verified", true, true);
         flowy_json_field_hex64("semantic_schema_hash", schema_hash, true); flowy_json_field_hex64("constraint_hash", constraint_hash, true);
@@ -344,11 +386,13 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
     } else {
         printf("=== FLOWY HoTT Contract & Integer-Lattice Proof Mint ===\n"
                "Lean Source File       : %s\nExtracted Structure    : %s (%zu fields -> 64B Univalent)\n"
-               "Formal Theorems Count  : %zu\nKernel Verification    : %s\nSorry Axioms Count     : %zu\n"
+               "Formal Theorems Count  : %zu (Defs Covered: %zu/%zu, Orphan Defs: %zu)\n"
+               "Kernel Verification    : %s\nSorry Axioms Count     : %zu\n"
                "Minted FlowUnit ABI Hashes:\n  - semantic_schema    : 0x%016" PRIx64 "\n"
                "  - constraint_hash    : 0x%016" PRIx64 "\n  - capability_hash    : 0x%016" PRIx64 "\n",
                lean_file, ext.struct_name[0] ? ext.struct_name : "(default)", ext.field_count,
-               ext.theorem_count, kernel_pass ? "PASS (0 sorryAx)" : "FAILED", sorry_axioms,
+               ext.theorem_count, ext.covered_defs, ext.def_count, ext.orphan_defs,
+               kernel_pass ? "PASS (0 sorryAx)" : "FAILED", sorry_axioms,
                schema_hash, constraint_hash, capability_hash);
         if (transition) printf("State-Transition Proof : VERIFIED (S_t -> S_{t+1} Conservation)\n");
         if (mint_abi) printf("ABI header written to  : %s\n", mint_abi);

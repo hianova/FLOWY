@@ -45,4 +45,5 @@ theorem tax_split_conservation (total fee : Int) : fee + (total - fee) = total :
 theorem split_70_30_conservation (tax : Nat) : (tax * 7000) / 10000 + (tax - (tax * 7000) / 10000) = tax := by omega
 theorem anti_tunneling_swept_invariant (a b L : Int) (h : L >= (b - a) + 2) : L > (b - a) := by omega
 theorem hysteresis_deadband_well_ordered : b_exit_q16 < b_enter_q16 := by decide
+theorem route_config_well_formed : route_op_mask > 0 ∧ qshift = 16 ∧ weight_q16 > 0 ∧ (req_values &&& req_mask) = req_values := by decide
 theorem transition_step_conserved (s0 delta : Nat) (h : delta <= s0) : (s0 - delta) + delta = s0 := by omega
