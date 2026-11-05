@@ -1,10 +1,17 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -O3
 FLOW_DIR ?= $(abspath ../FLOW)
-LEAN ?= lean
+LEAN ?= $(shell command -v lean 2>/dev/null || echo $$HOME/.elan/bin/lean)
 
-INCLUDES := -I./src -I$(FLOW_DIR)/src -I$(FLOW_DIR)/build
-LDFLAGS := -L$(FLOW_DIR)/build -lflow_rt -lpthread -lm
+ifneq ($(wildcard $(FLOW_DIR)/build/libflow_rt.a),)
+    INCLUDES := -I./src -I$(FLOW_DIR)/src -I$(FLOW_DIR)/build -I./vendor_flow
+    LDFLAGS := -L$(FLOW_DIR)/build -lflow_rt -lpthread -lm
+    VENDOR_OBJ :=
+else
+    INCLUDES := -I./src -I./vendor_flow
+    LDFLAGS := -lpthread -lm
+    VENDOR_OBJ := build/flow_core.o
+endif
 
 SRCS := src/flowy_cli.c \
         src/cmd_slice.c \
@@ -14,12 +21,16 @@ SRCS := src/flowy_cli.c \
         src/cmd_sieve.c \
         src/main.c
 
-OBJS := $(SRCS:src/%.c=build/%.o)
+OBJS := $(SRCS:src/%.c=build/%.o) $(VENDOR_OBJ)
 TARGET := build/flowy
 
 .PHONY: all clean test verify-lean check-loc
 
 all: $(TARGET)
+
+build/flow_core.o: vendor_flow/flow_core.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 build/%.o: src/%.c
 	@mkdir -p build

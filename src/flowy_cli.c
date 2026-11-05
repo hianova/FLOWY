@@ -302,7 +302,8 @@ int cmd_init_run(int argc, char **argv, bool json_mode) {
 
     fp = fopen(f_mk, "w");
     if (!fp) return 1;
-    fprintf(fp, "CC ?= cc\nCFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -O2\nLEAN ?= lean\n\n"
+    fprintf(fp, "CC ?= cc\nCFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -O2\n"
+                "LEAN ?= $(shell command -v lean 2>/dev/null || echo $$HOME/.elan/bin/lean)\n\n"
                 ".PHONY: all test verify-lean clean\n\n"
                 "all: build/app\n\n"
                 "build/app: src/main.c include/project_state.h\n"

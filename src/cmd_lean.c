@@ -77,6 +77,12 @@ static int run_batch_lean_verify(const char **files, size_t count, bool json_mod
             freopen("/dev/null", "w", stdout);
             freopen("/dev/null", "w", stderr);
             execlp("lean", "lean", files[i], (char *)NULL);
+            const char *home = getenv("HOME");
+            if (home) {
+                char elan_lean[512];
+                snprintf(elan_lean, sizeof(elan_lean), "%s/.elan/bin/lean", home);
+                execl(elan_lean, "lean", files[i], (char *)NULL);
+            }
             _exit(127);
         } else if (pid < 0) {
             fprintf(stderr, "Error: fork failed for %s\n", files[i]);
@@ -213,17 +219,21 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
         char dname[64] = {0};
         const char *assign = strstr(t, ":=");
         if (sscanf(t + kw, "%63[A-Za-z0-9_]", dname) == 1) {
-            int idx = -1;
-            if (ext->def_count < 64) {
-                idx = (int)ext->def_count++;
-                snprintf(ext->def_names[idx], 48, "%s", dname);
-                ext->def_covered[idx] = false;
-                ext->def_deps[idx] = 0ULL;
-            }
-            ext->cur_def_idx = idx;
-            if (assign) {
-                mark_referenced_defs(assign + 2, ext, idx);
-                extract_def_constant(dname, assign + 2, ext);
+            if (strcmp(dname, "main") == 0) {
+                ext->cur_def_idx = -1;
+            } else {
+                int idx = -1;
+                if (ext->def_count < 64) {
+                    idx = (int)ext->def_count++;
+                    snprintf(ext->def_names[idx], 48, "%s", dname);
+                    ext->def_covered[idx] = false;
+                    ext->def_deps[idx] = 0ULL;
+                }
+                ext->cur_def_idx = idx;
+                if (assign) {
+                    mark_referenced_defs(assign + 2, ext, idx);
+                    extract_def_constant(dname, assign + 2, ext);
+                }
             }
         }
     } else if (ext->in_theorem && *t != '\0') {
@@ -482,7 +492,9 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
     size_t sorry_axioms = 0;
     if (verify) {
         char cmd[512];
-        snprintf(cmd, sizeof(cmd), "lean \"%s\" > /dev/null 2>&1", lean_file);
+        snprintf(cmd, sizeof(cmd),
+                 "(command -v lean >/dev/null 2>&1 && lean \"%s\" || \"$HOME/.elan/bin/lean\" \"%s\") > /dev/null 2>&1",
+                 lean_file, lean_file);
         if (system(cmd) != 0) { kernel_pass = false; sorry_axioms = 1; }
     }
 
