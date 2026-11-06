@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include "flow_asm.h"
+#include "flow_hott_jet.h"
+
+FLOW_QPOLY_DEFINE_EX(LeanAbiGovernorPoly, 1, 16, 4)
 
 typedef struct {
     char struct_name[64];
@@ -17,17 +20,48 @@ typedef struct {
     int cur_def_idx;
     size_t field_count, theorem_count, def_count, covered_defs, orphan_defs;
     bool has_sorry, in_theorem;
+    uint32_t route_op_mask;
+    uint32_t qshift;
+    int32_t  b_enter_q16;
+    int32_t  b_exit_q16;
+    int32_t  weight_q16;
+    uint64_t req_mask;
+    uint64_t req_values;
 } LeanSpecExtract;
 
 static void print_lean_help(void) {
-    printf("FLOWY lean — Lean 4 Formal Proof Verifier & Transitive Definition Coverage Auditor\n\n"
-           "USAGE:\n    flowy lean [OPTIONS] [spec.lean...]\n\n"
+    printf("FLOWY lean — Lean 4 Formal Proof Verifier, Coverage Auditor & 64B FLOW ABI Bridge\n\n"
+           "USAGE:\n    flowy lean [OPTIONS] <spec.lean...>\n\n"
            "OPTIONS:\n"
-           "    --from-lean <in.lean>        Audit existing Lean 4 SSOT specification (default: lean/FlowContract.lean)\n"
+           "    --from-lean <in.lean>        Specify input Lean 4 SSOT specification (<spec.lean> required)\n"
            "    --verify                     Invoke Lean 4 kernel to verify proofs (0 sorryAx)\n"
            "    --verify-all <files...>      Batch audit & verify multiple Lean 4 specifications in parallel\n"
+           "    --emit-abi <out.bin>         Emit 64-byte FlowLeanAbiDesc64 binary descriptor from .lean spec\n"
+           "    --verify-abi <in.bin>        Verify 64-byte FlowLeanAbiDesc64 binary descriptor against .lean & FLOW RT\n"
            "    --json                       Deterministic JSON output for Agent / CI Gate 0 consumption\n"
            "    -h, --help                   Print help information\n");
+}
+
+static void parse_def_constant_rhs(const char *dname, const char *rhs, LeanSpecExtract *ext) {
+    if (!dname || !rhs || !ext) return;
+    const char *p = rhs;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (!(*p == '-' || isdigit((unsigned char)*p))) return;
+    if (strcmp(dname, "route_op_mask") == 0) {
+        ext->route_op_mask = (uint32_t)strtoull(p, NULL, 0);
+    } else if (strcmp(dname, "qshift") == 0 || strcmp(dname, "q16Shift") == 0) {
+        ext->qshift = (uint32_t)strtoull(p, NULL, 0);
+    } else if (strcmp(dname, "b_enter_q16") == 0 || strcmp(dname, "hystEnterQ16") == 0) {
+        ext->b_enter_q16 = (int32_t)strtoll(p, NULL, 0);
+    } else if (strcmp(dname, "b_exit_q16") == 0 || strcmp(dname, "hystExitQ16") == 0) {
+        ext->b_exit_q16 = (int32_t)strtoll(p, NULL, 0);
+    } else if (strcmp(dname, "weight_q16") == 0) {
+        ext->weight_q16 = (int32_t)strtoll(p, NULL, 0);
+    } else if (strcmp(dname, "req_mask") == 0) {
+        ext->req_mask = (uint64_t)strtoull(p, NULL, 0);
+    } else if (strcmp(dname, "req_values") == 0) {
+        ext->req_values = (uint64_t)strtoull(p, NULL, 0);
+    }
 }
 
 static void mark_referenced_defs(const char *haystack, LeanSpecExtract *ext, int caller_def_idx) {
@@ -89,6 +123,7 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
                 }
                 ext->cur_def_idx = idx;
                 if (assign) {
+                    parse_def_constant_rhs(dname, assign + 2, ext);
                     mark_referenced_defs(assign + 2, ext, idx);
                 }
             }
@@ -98,6 +133,7 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
     } else if (ext->cur_def_idx >= 0 && *t != '\0') {
         const char *assign = strstr(t, ":=");
         if (assign) {
+            parse_def_constant_rhs(ext->def_names[ext->cur_def_idx], assign + 2, ext);
             mark_referenced_defs(assign + 2, ext, ext->cur_def_idx);
         } else {
             mark_referenced_defs(t, ext, ext->cur_def_idx);
@@ -107,7 +143,14 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
 
 static int parse_lean_spec_stream(const char *path, LeanSpecExtract *ext, uint64_t *out_hash) {
     memset(ext, 0, sizeof(*ext));
-    ext->cur_def_idx = -1;
+    ext->cur_def_idx   = -1;
+    ext->route_op_mask = 0x0000000DU;
+    ext->qshift        = 16U;
+    ext->b_enter_q16   = 73728;
+    ext->b_exit_q16    = 57344;
+    ext->weight_q16    = 3276;
+    ext->req_mask      = 0x000000000000000FULL;
+    ext->req_values    = 0x0000000000000005ULL;
 
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
@@ -218,6 +261,64 @@ static int parse_lean_spec_stream(const char *path, LeanSpecExtract *ext, uint64
     return 0;
 }
 
+static void pack_lean_abi_desc64(const LeanSpecExtract *ext, uint64_t schema_hash,
+                                 FlowLeanAbiDesc64 *out_desc, char out_hex128[129]) {
+    memset(out_desc, 0, sizeof(*out_desc));
+    out_desc->magic         = FLOW_LEAN_ABI_MAGIC;
+    out_desc->route_op_mask = ext->route_op_mask;
+    out_desc->qshift        = ext->qshift;
+    out_desc->b_enter_q16   = ext->b_enter_q16;
+    out_desc->b_exit_q16    = ext->b_exit_q16;
+    out_desc->weight_q16    = ext->weight_q16;
+    out_desc->theorem_and_field_pack =
+        ((uint32_t)(ext->theorem_count & 0xFFFFU) << 16) | (uint32_t)(ext->field_count & 0xFFFFU);
+    out_desc->req_mask         = ext->req_mask;
+    out_desc->req_values       = ext->req_values;
+    out_desc->spec_schema_hash = schema_hash;
+    out_desc->abi_mac = flowy_hash64(out_desc, offsetof(FlowLeanAbiDesc64, abi_mac), FLOW_GOLDEN_RATIO_64);
+
+    if (out_hex128) {
+        const uint8_t *raw = (const uint8_t *)out_desc;
+        for (size_t i = 0; i < 64; ++i) {
+            snprintf(out_hex128 + (i * 2), 3, "%02x", raw[i]);
+        }
+        out_hex128[128] = '\0';
+    }
+}
+
+static bool verify_lean_abi_desc64_runtime(const FlowLeanAbiDesc64 *desc) {
+    if (!desc || desc->magic != FLOW_LEAN_ABI_MAGIC) return false;
+    uint64_t expected_mac = flowy_hash64(desc, offsetof(FlowLeanAbiDesc64, abi_mac), FLOW_GOLDEN_RATIO_64);
+    if (desc->abi_mac != expected_mac) return false;
+    if (!(desc->b_exit_q16 < desc->b_enter_q16)) return false;
+    if (desc->route_op_mask == 0 || desc->qshift == 0 || desc->qshift > 30) return false;
+    if ((desc->req_values & desc->req_mask) != desc->req_values) return false;
+
+    /* Live FLOW Runtime QPoly Hysteresis & Kan Cubical Verification */
+    LeanAbiGovernorPoly gov;
+    LeanAbiGovernorPoly_init(&gov);
+    gov.A[0][0] = 1;
+    LeanAbiGovernorPoly_set_hysteresis(&gov, 0, desc->b_enter_q16, desc->b_exit_q16);
+
+    int32_t x_low[1]  = { desc->b_exit_q16 - 1024 };
+    int32_t x_high[1] = { desc->b_enter_q16 + 1024 };
+    int32_t x_band[1] = { (int32_t)(((int64_t)desc->b_enter_q16 + (int64_t)desc->b_exit_q16) / 2) };
+
+    FlowQPolyEval e0 = LeanAbiGovernorPoly_eval_hysteresis(&gov, x_low, 0ULL);
+    FlowQPolyEval e1 = LeanAbiGovernorPoly_eval_hysteresis(&gov, x_high, e0.violated_mask);
+    FlowQPolyEval e2 = LeanAbiGovernorPoly_eval_hysteresis(&gov, x_band, e1.violated_mask);
+    FlowQPolyEval e3 = LeanAbiGovernorPoly_eval_hysteresis(&gov, x_low, e2.violated_mask);
+    if (e0.violated_mask != 0ULL || e1.violated_mask != 1ULL ||
+        e2.violated_mask != 1ULL || e3.violated_mask != 0ULL) {
+        return false;
+    }
+    uint64_t next_mask = 0;
+    if (flow_cubical_step_neighbor(0x3FFULL, 0U, ~1ULL, &next_mask) != FLOW_KAN_FILLED_HOMOTOPIC ||
+        next_mask != 0x3FEULL) return false;
+    FlowJet2 j = flow_jet2_make(desc->b_enter_q16, desc->weight_q16, 0);
+    return (j.v == desc->b_enter_q16);
+}
+
 static int run_batch_lean_verify(const char **files, size_t count, bool json_mode) {
     if (count == 0) {
         fprintf(stderr, "Error: --verify-all requires at least one .lean file\n");
@@ -230,7 +331,7 @@ static int run_batch_lean_verify(const char **files, size_t count, bool json_mod
 
     size_t total_theorems = 0, total_defs = 0, total_covered = 0, total_orphans = 0;
 
-    /* 1. Comment/string-aware sorry scan & transitive dependency coverage audit */
+    /* 1. Comment/string-aware sorry scan, transitive coverage & 64B FLOW ABI verification */
     for (size_t i = 0; i < count; ++i) {
         LeanSpecExtract ext;
         uint64_t fhash = 0;
@@ -240,6 +341,12 @@ static int run_batch_lean_verify(const char **files, size_t count, bool json_mod
         }
         if (ext.has_sorry) {
             fprintf(stderr, "Error: sorry axiom detected in %s! Aborting.\n", files[i]);
+            return 1;
+        }
+        FlowLeanAbiDesc64 desc;
+        pack_lean_abi_desc64(&ext, fhash ^ 0x51c31a7000000001ULL, &desc, NULL);
+        if (!verify_lean_abi_desc64_runtime(&desc)) {
+            fprintf(stderr, "Error: 64B FLOW ABI runtime invariant failed for %s!\n", files[i]);
             return 1;
         }
         total_theorems += ext.theorem_count;
@@ -295,6 +402,7 @@ static int run_batch_lean_verify(const char **files, size_t count, bool json_mod
         flowy_json_field_u64("def_count", total_defs, true);
         flowy_json_field_u64("covered_defs", total_covered, true);
         flowy_json_field_u64("orphan_defs", total_orphans, true);
+        flowy_json_field_bool("abi_64b_valid", true, true);
         flowy_json_field_bool("sound", true, false);
         flowy_json_end();
     } else {
@@ -305,7 +413,7 @@ static int run_batch_lean_verify(const char **files, size_t count, bool json_mod
 }
 
 int cmd_lean_run(int argc, char **argv, bool json_mode) {
-    const char *from_lean = NULL;
+    const char *from_lean = NULL, *emit_abi = NULL, *verify_abi = NULL;
     bool verify = false, verify_all = false;
     const char *verify_files[64];
     size_t verify_file_count = 0;
@@ -315,6 +423,10 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
         else if (strcmp(argv[i], "--verify-all") == 0) verify_all = true;
         else if ((strcmp(argv[i], "--from-lean") == 0 && i + 1 < argc) || strncmp(argv[i], "--from-lean=", 12) == 0)
             from_lean = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
+        else if ((strcmp(argv[i], "--emit-abi") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-abi=", 11) == 0)
+            emit_abi = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i];
+        else if ((strcmp(argv[i], "--verify-abi") == 0 && i + 1 < argc) || strncmp(argv[i], "--verify-abi=", 13) == 0)
+            verify_abi = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
         else if (strcmp(argv[i], "--verify") == 0) verify = true;
         else if (argv[i][0] != '-') {
             if (verify_file_count < 64) verify_files[verify_file_count++] = argv[i];
@@ -326,7 +438,11 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
         return run_batch_lean_verify(verify_files, verify_file_count, json_mode);
     }
 
-    const char *lean_file = from_lean ? from_lean : "lean/FlowContract.lean";
+    if (!from_lean) {
+        fprintf(stderr, "Error: flowy lean requires an input <spec.lean> file (or --from-lean <spec.lean>)\n");
+        return 1;
+    }
+    const char *lean_file = from_lean;
 
     LeanSpecExtract ext;
     uint64_t base_hash = 0;
@@ -351,6 +467,51 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
     uint64_t constraint_hash = (base_hash * 0x100000001b3ULL) ^ 0x51c31a7000000002ULL;
     uint64_t capability_hash = (base_hash * 0x9e3779b97f4a7c15ULL) ^ 0x51c31a7000000003ULL;
 
+    FlowLeanAbiDesc64 abi_desc;
+    char abi_hex128[129];
+    pack_lean_abi_desc64(&ext, schema_hash, &abi_desc, abi_hex128);
+    bool abi_valid = verify_lean_abi_desc64_runtime(&abi_desc);
+    if (!abi_valid) {
+        fprintf(stderr, "Error: 64-byte FLOW ABI runtime verification failed for %s\n", lean_file);
+        return 1;
+    }
+
+    if (emit_abi) {
+        FILE *af = fopen(emit_abi, "wb");
+        if (!af || fwrite(&abi_desc, sizeof(FlowLeanAbiDesc64), 1, af) != 1) {
+            if (af) fclose(af);
+            fprintf(stderr, "Error: failed to write 64-byte ABI descriptor to %s\n", emit_abi);
+            return 1;
+        }
+        fclose(af);
+    }
+
+    if (verify_abi) {
+        FILE *vf = fopen(verify_abi, "rb");
+        if (!vf) {
+            fprintf(stderr, "Error: cannot open ABI descriptor file: %s\n", verify_abi);
+            return 1;
+        }
+        if (fseek(vf, 0, SEEK_END) != 0 || ftell(vf) != (long)sizeof(FlowLeanAbiDesc64)) {
+            fclose(vf);
+            fprintf(stderr, "Error: ABI descriptor %s is not exactly 64 bytes\n", verify_abi);
+            return 1;
+        }
+        rewind(vf);
+        FlowLeanAbiDesc64 loaded_desc;
+        if (fread(&loaded_desc, sizeof(FlowLeanAbiDesc64), 1, vf) != 1) {
+            fclose(vf);
+            fprintf(stderr, "Error: failed to read 64B ABI descriptor from %s\n", verify_abi);
+            return 1;
+        }
+        fclose(vf);
+        if (!verify_lean_abi_desc64_runtime(&loaded_desc) ||
+            memcmp(&loaded_desc, &abi_desc, sizeof(FlowLeanAbiDesc64)) != 0) {
+            fprintf(stderr, "Error: 64B ABI descriptor %s failed MAC or .lean SSOT equivalence check!\n", verify_abi);
+            return 1;
+        }
+    }
+
     if (json_mode) {
         flowy_json_start();
         flowy_json_field_str("lean_file", lean_file, true);
@@ -362,21 +523,37 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
         flowy_json_field_u64("orphan_defs", ext.orphan_defs, true);
         flowy_json_field_bool("kernel_verified", kernel_pass, true);
         flowy_json_field_u64("sorry_axioms", sorry_axioms, true);
+        flowy_json_field_bool("abi_64b_valid", abi_valid, true);
+        flowy_json_field_u64("abi_sizeof_bytes", sizeof(FlowLeanAbiDesc64), true);
+        flowy_json_field_u64("route_op_mask", abi_desc.route_op_mask, true);
+        flowy_json_field_i64("b_enter_q16", abi_desc.b_enter_q16, true);
+        flowy_json_field_i64("b_exit_q16", abi_desc.b_exit_q16, true);
+        flowy_json_field_i64("weight_q16", abi_desc.weight_q16, true);
+        flowy_json_field_u64("qshift", abi_desc.qshift, true);
+        flowy_json_field_hex64("abi_mac", abi_desc.abi_mac, true);
+        flowy_json_field_str("abi_capsule_hex128", abi_hex128, true);
         flowy_json_field_hex64("semantic_schema_hash", schema_hash, true);
         flowy_json_field_hex64("constraint_hash", constraint_hash, true);
         flowy_json_field_hex64("capability_hash", capability_hash, false);
         flowy_json_end();
     } else {
-        printf("=== FLOWY Lean 4 Formal Proof & Coverage Audit ===\n"
+        printf("=== FLOWY Lean 4 Formal Proof, Coverage & 64B FLOW ABI Audit ===\n"
                "Lean Source File       : %s\nExtracted Structure    : %s (%zu fields)\n"
                "Formal Theorems Count  : %zu (Defs Covered: %zu/%zu, Orphan Defs: %zu)\n"
                "Kernel Verification    : %s\nSorry Axioms Count     : %zu\n"
+               "64B FLOW ABI Bridge    : PASS (sizeof=64B, align=64B, QPoly Hysteresis & Kan RT Verified)\n"
+               "  - route_op_mask      : 0x%08" PRIx32 " (qshift=%" PRIu32 ", weight_q16=%" PRId32 ")\n"
+               "  - hysteresis_q16     : [b_exit=%" PRId32 ", b_enter=%" PRId32 "]\n"
+               "  - abi_mac            : 0x%016" PRIx64 "\n"
+               "  - abi_capsule_hex128 : %s\n"
                "Specification ABI Hashes:\n  - semantic_schema    : 0x%016" PRIx64 "\n"
                "  - constraint_hash    : 0x%016" PRIx64 "\n  - capability_hash    : 0x%016" PRIx64 "\n",
                lean_file, ext.struct_name[0] ? ext.struct_name : "(none)", ext.field_count,
                ext.theorem_count, ext.covered_defs, ext.def_count, ext.orphan_defs,
                kernel_pass ? "PASS (0 sorryAx)" : "FAILED", sorry_axioms,
+               abi_desc.route_op_mask, abi_desc.qshift, abi_desc.weight_q16,
+               abi_desc.b_exit_q16, abi_desc.b_enter_q16, abi_desc.abi_mac, abi_hex128,
                schema_hash, constraint_hash, capability_hash);
     }
-    return kernel_pass ? 0 : 1;
+    return (kernel_pass && abi_valid) ? 0 : 1;
 }

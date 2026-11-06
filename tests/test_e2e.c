@@ -21,6 +21,7 @@ typedef struct {
 } TestRouteDesc64;
 
 FLOW_STATIC_ASSERT_UNIVALENT(FlowCorpusRecord64, TestRouteDesc64);
+FLOW_STATIC_ASSERT_UNIVALENT(FlowCorpusRecord64, FlowLeanAbiDesc64);
 FLOW_QPOLY_DEFINE_EX(TestGovernorPoly, 1, 16, 4)
 FLOW_SPSC_DEFINE(TestRing, uint64_t, 16)
 
@@ -30,9 +31,11 @@ int main(void) {
     /* 1. Verify 64-Byte Cache-Line Univalence */
     _Static_assert(sizeof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 size must be 64 bytes");
     _Static_assert(_Alignof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 align must be 64 bytes");
+    _Static_assert(sizeof(FlowLeanAbiDesc64) == 64, "FlowLeanAbiDesc64 size must be 64 bytes");
+    _Static_assert(_Alignof(FlowLeanAbiDesc64) == 64, "FlowLeanAbiDesc64 align must be 64 bytes");
     _Static_assert(sizeof(TestRouteDesc64) == 64, "TestRouteDesc64 size must be 64 bytes");
     _Static_assert(_Alignof(TestRouteDesc64) == 64, "TestRouteDesc64 align must be 64 bytes");
-    printf("  [PASS] FlowCorpusRecord64 & TestRouteDesc64 64-Byte Cache-Line Univalence\n");
+    printf("  [PASS] FlowCorpusRecord64, FlowLeanAbiDesc64 & TestRouteDesc64 64-Byte Cache-Line Univalence\n");
 
     /* 2. Verify QPoly Inner Quantization & Hysteresis Trip/Hold/Release Invariant */
     int64_t a_num[1] = {1}, b_num[1] = {65536}, box_min[1] = {-1000000}, box_max[1] = {1000000};
@@ -132,7 +135,52 @@ int main(void) {
     assert(flow_reload_destroy(ctx) == 0);
     printf("  [PASS] Live QSBR 64B Descriptor Hot-Swap Invariant (0 Downtime, 0 Recompile)\n");
 
-    /* 8. Verify Transitive Orphan-Def Audit, Comment-Aware Sorry Filter & Trace Validation */
+    /* 8. Verify Dynamic .lean -> 64B FLOW ABI Bridge, Transitive Orphan-Def Audit & Trace Validation */
+    assert(system("./build/flowy lean > /dev/null 2>&1") != 0);
+
+    FILE *af = fopen("build/tmp_abi_spec.lean", "w");
+    assert(af != NULL);
+    fprintf(af, "structure FlowTestState where\n"
+                "  reserveA : Nat\n"
+                "  reserveB : Nat\n"
+                "def route_op_mask : UInt32 := 0x0000000D\n"
+                "def b_enter_q16   : Int    := 73728\n"
+                "def b_exit_q16    : Int    := 57344\n"
+                "def req_mask      : UInt64 := 0x000000000000000F\n"
+                "def req_values    : UInt64 := 0x0000000000000005\n"
+                "def weight_q16    : Int32  := 3276\n"
+                "def qshift        : UInt32 := 16\n"
+                "theorem hyst_order : b_exit_q16 < b_enter_q16 := by decide\n"
+                "theorem route_ok : route_op_mask > 0 ∧ qshift = 16 ∧ weight_q16 > 0 ∧ (req_values &&& req_mask) = req_values := by decide\n");
+    fclose(af);
+    assert(system("./build/flowy lean --from-lean build/tmp_abi_spec.lean --emit-abi build/tmp_abi_spec.bin --verify --json > build/lean_test.json") == 0);
+    assert(system("./build/flowy lean --from-lean build/tmp_abi_spec.lean --verify-abi build/tmp_abi_spec.bin > /dev/null") == 0);
+    assert(system("./build/flowy lean --verify-all build/tmp_abi_spec.lean > /dev/null") == 0);
+    {
+        FILE *abif = fopen("build/tmp_abi_spec.bin", "rb");
+        assert(abif != NULL);
+        FlowLeanAbiDesc64 desc;
+        assert(fread(&desc, sizeof(FlowLeanAbiDesc64), 1, abif) == 1);
+        fclose(abif);
+        assert(desc.magic == FLOW_LEAN_ABI_MAGIC);
+        assert(desc.route_op_mask == 0x0000000DU);
+        assert(desc.qshift == 16U);
+        assert(desc.b_enter_q16 == 73728);
+        assert(desc.b_exit_q16 == 57344);
+        assert(desc.weight_q16 == 3276);
+        assert(desc.req_mask == 0x0FULL);
+        assert(desc.req_values == 0x05ULL);
+        assert(desc.abi_mac == flowy_hash64(&desc, offsetof(FlowLeanAbiDesc64, abi_mac), FLOW_GOLDEN_RATIO_64));
+
+        /* Tamper with ABI binary and verify --verify-abi rejects it */
+        desc.b_enter_q16 = 65536;
+        FILE *bad_abi = fopen("build/tmp_bad_abi_spec.bin", "wb");
+        assert(bad_abi != NULL);
+        assert(fwrite(&desc, sizeof(FlowLeanAbiDesc64), 1, bad_abi) == 1);
+        fclose(bad_abi);
+        assert(system("./build/flowy lean --from-lean build/tmp_abi_spec.lean --verify-abi build/tmp_bad_abi_spec.bin > /dev/null 2>&1") != 0);
+    }
+
     FILE *tf = fopen("build/tmp_orphan_chain.lean", "w");
     assert(tf != NULL);
     fprintf(tf, "-- Comment mentioning sorry and sorryAx should be ignored by parser\n"
@@ -154,6 +202,8 @@ int main(void) {
     assert(strstr(jbuf, "\"def_count\": 4") != NULL);
     assert(strstr(jbuf, "\"covered_defs\": 2") != NULL);
     assert(strstr(jbuf, "\"orphan_defs\": 2") != NULL);
+    assert(strstr(jbuf, "\"b_enter_q16\": 81920") != NULL);
+    assert(strstr(jbuf, "\"abi_64b_valid\": true") != NULL);
 
     /* Verify --verify-trace rejects malformed hex, single step, trailing comma, and broken Kan step */
     assert(system("./build/flowy sieve --verify-trace invalid_hex > /dev/null 2>&1") != 0);

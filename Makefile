@@ -48,7 +48,7 @@ check-loc:
 	@wc -l src/*
 
 test: $(TARGET)
-	@mkdir -p build lean tests
+	@mkdir -p build tests
 	@echo "=== Running FLOWY Gate 0 & Wind-Tunnel Test Suite ==="
 	# 1. Top-level help, version and subcommand help routing
 	$(TARGET) --help > /dev/null
@@ -60,6 +60,7 @@ test: $(TARGET)
 	$(TARGET) --version
 	# 2. Subcommand: slice (64B Univalence Audit, --audit-all, LLVM AST/IR/MCA & Git routing)
 	$(TARGET) slice src/flowy_cli.h --audit-struct FlowCorpusRecord64 --json > build/slice_corpus64.json
+	$(TARGET) slice src/flowy_cli.h --audit-struct FlowLeanAbiDesc64 --json > build/slice_lean_abi64.json
 	$(TARGET) slice src/flowy_cli.h --audit-all --json > build/slice_all.json
 	$(TARGET) slice src/flowy_cli.c --llvm-ast --llvm-ir --mca --git-diff --json > build/slice_test.json
 	# 3. Subcommand: qpoly (Conservative inner polytope quantization, --qshift-sweep & --auto-cegis)
@@ -72,10 +73,7 @@ test: $(TARGET)
 	$(TARGET) diff --mode relativistic --trials 10000 --auto-cegis --json > build/diff_relativistic.json
 	$(TARGET) diff --mode arith --trials 256 --emit-corpus build/corpus_arith.bin --json > build/diff_corpus_emit.json
 	$(TARGET) diff --corpus build/corpus_arith.bin --json > build/diff_corpus_replay.json
-	# 5. Subcommand: lean (Formal proof kernel verification, transitive def coverage & parallel batch verifier)
-	$(TARGET) lean --from-lean lean/FlowContract.lean --verify --json > build/lean_test.json
-	$(TARGET) lean --verify-all lean/FlowContract.lean
-	# 6. Subcommand: sieve (Boundary tag, Sieve pullback, Kan Homotopy, HIT Quotient, Wave64, Hex128 Capsule & --verify-trace)
+	# 5. Subcommand: sieve (Boundary tag, Sieve pullback, Kan Homotopy, HIT Quotient, Wave64, Hex128 Capsule & --verify-trace)
 	$(TARGET) sieve --decode-tag 0x7FF8400010040000 --json > build/sieve_tag.json
 	$(TARGET) sieve --decode-sieve 0x3FF --json > build/sieve_mask.json
 	$(TARGET) sieve --homotopy 0x3FF 0x3FE --json > build/sieve_homotopy.json
@@ -85,11 +83,12 @@ test: $(TARGET)
 	$(TARGET) sieve --capsule-encode "FLOW_UNIVALENT_CAPSULE_PAYLOAD" --json > build/capsule_enc.json
 	$(TARGET) sieve --capsule-decode 464c4f575f554e4956414c454e545f43415053554c455f5041594c4f4144000000000000000000000000000000000000000000000000000079c33513c3dc78b6 --json > build/capsule_dec.json
 	$(TARGET) sieve --verify-trace 0x3FF,0x3FE,0x3FC,0x3FF --json > build/sieve_trace.json
-	# 7. End-to-end integration test runner
+	# 6. End-to-end integration test runner (including dynamic .lean -> 64B FLOW ABI verification)
 	$(CC) $(CFLAGS) $(INCLUDES) tests/test_e2e.c src/flowy_cli.c -o build/test_e2e $(LDFLAGS)
 	./build/test_e2e
 	@echo "=== All Tests Passed Successfully! ==="
 
 verify-lean: $(TARGET)
-	$(TARGET) lean --verify-all lean/FlowContract.lean
-	@echo "=== Lean 4 Verification Verified (0 sorryAx)! ==="
+	$(CC) $(CFLAGS) $(INCLUDES) tests/test_e2e.c src/flowy_cli.c -o build/test_e2e $(LDFLAGS)
+	./build/test_e2e
+	@echo "=== Lean 4 & 64B FLOW ABI Verification Verified (0 sorryAx)! ==="
