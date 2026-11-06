@@ -59,10 +59,11 @@ typedef struct {
     uint64_t structs_with_padding_holes;
     uint64_t total_padding_hole_bytes;
 
-    /* 2. Arithmetic, Fixed-Point & Cyclic Mask Signatures (maps to FLOW ASM Sieve & Q48.16) */
+    /* 2. Arithmetic, Ternary, Fixed-Point & Cyclic Mask Signatures (maps to FLOW ASM Sieve & Q48.16) */
     uint64_t sig_overflow_checks;
     uint64_t sig_saturating_clamps;
     uint64_t sig_fixed_point_shifts;
+    uint64_t sig_ternary_minbit_quant;
     uint64_t sig_cyclic_ring_masks;
     uint64_t sig_arith_mask_total;
 
@@ -146,14 +147,49 @@ static void strip_comments_and_strings(char *src) {
     }
 }
 
+static size_t resolve_array_dim_in_buf(const char *expr, const char *file_buf) {
+    while (*expr && isspace((unsigned char)*expr)) expr++;
+    size_t n = (size_t)strtoull(expr, NULL, 0);
+    if (n > 0U) return n <= 65536U ? n : 1U;
+    if (!file_buf) return 4U;
+    char id[64] = {0};
+    size_t k = 0U;
+    while ((isalnum((unsigned char)expr[k]) || expr[k] == '_') && k < 63U) {
+        id[k] = expr[k];
+        k++;
+    }
+    if (k == 0U) return 1U;
+    const char *hit = file_buf;
+    while ((hit = strstr(hit, id)) != NULL) {
+        const char *after = hit + k;
+        if ((hit == file_buf || (!isalnum((unsigned char)hit[-1]) && hit[-1] != '_')) &&
+            (!isalnum((unsigned char)*after) && *after != '_')) {
+            while (*after && (*after == ' ' || *after == '\t' || *after == '=')) after++;
+            size_t v = (size_t)strtoull(after, NULL, 0);
+            if (v > 0U && v <= 65536U) return v;
+        }
+        hit += k;
+    }
+    return 4U;
+}
+
 static size_t infer_field_type_size(const char *decl, size_t *out_align) {
     size_t sz = 8U, al = 8U;
     if (strchr(decl, '*')) {
         sz = 8U;
         al = 8U;
-    } else if (strstr(decl, "128")) {
+    } else if (strstr(decl, "MinBitWave64")) {
+        sz = 128U;
+        al = 64U;
+    } else if (strstr(decl, "64 ") || strstr(decl, "64\t") || strstr(decl, "Wave64") ||
+               strstr(decl, "Desc64") || strstr(decl, "Node64") || strstr(decl, "State64") ||
+               strstr(decl, "Clause64") || strstr(decl, "Glyph64") || strstr(decl, "Voice64") ||
+               strstr(decl, "Poly4D") || strstr(decl, "Ring64") || strstr(decl, "StateV4")) {
+        sz = 64U;
+        al = 64U;
+    } else if (strstr(decl, "128") || strstr(decl, "FlowResultU64") || strstr(decl, "FlowBmfTernary64")) {
         sz = 16U;
-        al = 16U;
+        al = 8U;
     } else if (strstr(decl, "uint64_t") || strstr(decl, "int64_t") || strstr(decl, "__u64") ||
                strstr(decl, "__s64") || strstr(decl, "u64 ") || strstr(decl, "s64 ") ||
                strstr(decl, "ulong") || strstr(decl, "unsigned long") || strstr(decl, "long long") ||
@@ -163,12 +199,13 @@ static size_t infer_field_type_size(const char *decl, size_t *out_align) {
     } else if (strstr(decl, "uint32_t") || strstr(decl, "int32_t") || strstr(decl, "__u32") ||
                strstr(decl, "__s32") || strstr(decl, "u32 ") || strstr(decl, "s32 ") ||
                strstr(decl, "atomic_t") || strstr(decl, "refcount_t") || strstr(decl, "float") ||
-               strstr(decl, "unsigned int") || strstr(decl, "int ") || strncmp(decl, "int\t", 4) == 0) {
+               strstr(decl, "Verdict") || strstr(decl, "unsigned int") ||
+               strstr(decl, "int ") || strncmp(decl, "int\t", 4) == 0) {
         sz = 4U;
         al = 4U;
     } else if (strstr(decl, "uint16_t") || strstr(decl, "int16_t") || strstr(decl, "__u16") ||
                strstr(decl, "__s16") || strstr(decl, "u16 ") || strstr(decl, "s16 ") ||
-               strstr(decl, "short")) {
+               strstr(decl, "fp16_t") || strstr(decl, "short")) {
         sz = 2U;
         al = 2U;
     } else if (strstr(decl, "uint8_t") || strstr(decl, "int8_t") || strstr(decl, "__u8") ||
@@ -204,8 +241,12 @@ static void parse_struct_geometries_in_buffer(const char *buf, StructuralMapRepo
         size_t hlen = (size_t)(brace_open - p);
         memcpy(hdr, p, hlen < sizeof(hdr) - 1U ? hlen : sizeof(hdr) - 1U);
         size_t forced_align = 1U;
-        if (strstr(hdr, "aligned(64") || strstr(hdr, "_Alignas(64")) forced_align = 64U;
-        else if (strstr(hdr, "aligned(16") || strstr(hdr, "_Alignas(16")) forced_align = 16U;
+        if (strstr(hdr, "aligned(64") || strstr(hdr, "_Alignas(64") ||
+            strstr(hdr, "CACHE_LINE_BYTES") || strstr(hdr, "WAVE_BYTES")) {
+            forced_align = 64U;
+        } else if (strstr(hdr, "aligned(16") || strstr(hdr, "_Alignas(16")) {
+            forced_align = 16U;
+        }
 
         int depth = 1;
         const char *q = brace_open + 1;
@@ -255,10 +296,11 @@ static void parse_struct_geometries_in_buffer(const char *buf, StructuralMapRepo
                     } else {
                         bit_rem = 0U;
                         size_t mult = 1U;
-                        const char *obr = strchr(stmt, '[');
-                        if (obr) {
-                            size_t arr_n = (size_t)strtoull(obr + 1, NULL, 0);
-                            if (arr_n > 0U && arr_n <= 4096U) mult = arr_n;
+                        const char *scan = stmt;
+                        while ((scan = strchr(scan, '[')) != NULL) {
+                            mult *= resolve_array_dim_in_buf(scan + 1, buf);
+                            const char *cbr = strchr(scan, ']');
+                            scan = cbr ? (cbr + 1) : (scan + 1);
                         }
                         size_t rem = cur_offset % f_al;
                         if (rem != 0U) {
@@ -350,6 +392,16 @@ static void scan_source_file(const char *filepath, StructuralMapReport *rep) {
         count_token(buf, ">> 16") +
         count_token(buf, "FractionalBits") +
         count_token(buf, "65536");
+
+    rep->sig_ternary_minbit_quant +=
+        count_token(buf, "ternary") +
+        count_token(buf, "tq1_") +
+        count_token(buf, "tq2_") +
+        count_token(buf, "q4_") +
+        count_token(buf, "q8_") +
+        count_token(buf, "min_bit") +
+        count_token(buf, "popcnt") +
+        count_token(buf, "popcount");
 
     rep->sig_cyclic_ring_masks +=
         count_token(buf, "& mask") +
@@ -585,7 +637,8 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
 
     rep.sig_arith_mask_total =
         rep.sig_overflow_checks + rep.sig_saturating_clamps +
-        rep.sig_fixed_point_shifts + rep.sig_cyclic_ring_masks;
+        rep.sig_fixed_point_shifts + rep.sig_ternary_minbit_quant +
+        rep.sig_cyclic_ring_masks;
 
     rep.sig_epoch_control_total =
         rep.sig_atomic_epoch_sync + rep.sig_heap_lifecycle_churn +
@@ -623,6 +676,7 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
         flowy_json_field_u64("sig_overflow_checks", rep.sig_overflow_checks, true);
         flowy_json_field_u64("sig_saturating_clamps", rep.sig_saturating_clamps, true);
         flowy_json_field_u64("sig_fixed_point_shifts", rep.sig_fixed_point_shifts, true);
+        flowy_json_field_u64("sig_ternary_minbit_quant", rep.sig_ternary_minbit_quant, true);
         flowy_json_field_u64("sig_cyclic_ring_masks", rep.sig_cyclic_ring_masks, true);
         flowy_json_field_u64("sig_arith_mask_total", rep.sig_arith_mask_total, true);
         flowy_json_field_u64("sig_atomic_epoch_sync", rep.sig_atomic_epoch_sync, true);
@@ -656,10 +710,12 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
         printf("    Structs w/ Padding Holes   : %" PRIu64 " (%" PRIu64 " wasted padding bytes eliminated by 16B/64B ABI)\n\n",
                rep.structs_with_padding_holes, rep.total_padding_hole_bytes);
 
-        printf("  [2. Arithmetic & Cyclic Mask Signatures -> FLOW 14-Axis ASM & Q48.16]\n");
+        printf("  [2. Arithmetic, Ternary & Cyclic Mask Signatures -> FLOW 14-Axis ASM & Q48.16]\n");
         printf("    Overflow Check Sites       : %" PRIu64 "\n", rep.sig_overflow_checks);
         printf("    Saturating / Clamp Sites   : %" PRIu64 "\n", rep.sig_saturating_clamps);
         printf("    Fixed-Point / Q16 Shifts   : %" PRIu64 "\n", rep.sig_fixed_point_shifts);
+        printf("    Ternary / MinBit / Quant   : %" PRIu64 " (maps to FlowBmfTernary64 & UnitMinBit)\n",
+               rep.sig_ternary_minbit_quant);
         printf("    Cyclic Ring Mask Sites     : %" PRIu64 "\n\n", rep.sig_cyclic_ring_masks);
 
         printf("  [3. Epoch Sync & Dynamics Signatures -> FLOW QSBR & 2-Jet / Schmitt QPoly]\n");
