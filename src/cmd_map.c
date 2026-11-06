@@ -46,7 +46,8 @@ FLOW_QPOLY_DEFINE_EX(MapTargetPoly1D, 1, 16, 4)
 typedef enum {
     TARGET_CORPUS_GENERIC  = 0,
     TARGET_CORPUS_LINUX    = 1,
-    TARGET_CORPUS_CHROMIUM = 2
+    TARGET_CORPUS_CHROMIUM = 2,
+    TARGET_CORPUS_DUAL     = 3
 } TargetCorpusKind;
 
 typedef struct {
@@ -170,6 +171,30 @@ static void detect_linux_version(const char *base, char *out_ver, size_t cap) {
         snprintf(out_ver, cap, "%d.%d.%d%s", ver, patch, sub >= 0 ? sub : 0, extra);
     } else {
         snprintf(out_ver, cap, "generic");
+    }
+}
+
+static void detect_chromium_version(const char *base, char *out_ver, size_t cap) {
+    char full[1024];
+    snprintf(full, sizeof(full), "%s/chrome/VERSION", base);
+    FILE *f = fopen(full, "rb");
+    if (!f) {
+        snprintf(out_ver, cap, "head");
+        return;
+    }
+    char line[128];
+    int major = -1, minor = 0, build = 0, patch = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "MAJOR=", 6) == 0) major = atoi(line + 6);
+        else if (strncmp(line, "MINOR=", 6) == 0) minor = atoi(line + 6);
+        else if (strncmp(line, "BUILD=", 6) == 0) build = atoi(line + 6);
+        else if (strncmp(line, "PATCH=", 6) == 0) patch = atoi(line + 6);
+    }
+    fclose(f);
+    if (major >= 0) {
+        snprintf(out_ver, cap, "%d.%d.%d.%d", major, minor, build, patch);
+    } else {
+        snprintf(out_ver, cap, "head");
     }
 }
 
@@ -343,35 +368,54 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
     snprintf(rep.target_path, sizeof(rep.target_path), "%s", target_dir);
     rep.trials = trials;
 
-    if (path_exists(target_dir, "Kbuild") || path_exists(target_dir, "io_uring/io_uring.c")) {
+    bool has_linux = path_exists(target_dir, "Kbuild") || path_exists(target_dir, "io_uring/io_uring.c");
+    bool has_chromium = path_exists(target_dir, "third_party/blink") || path_exists(target_dir, "mojo");
+
+    if (has_linux && has_chromium) {
+        char lver[32] = {0}, cver[32] = {0};
+        detect_linux_version(target_dir, lver, sizeof(lver));
+        detect_chromium_version(target_dir, cver, sizeof(cver));
+        rep.kind = TARGET_CORPUS_DUAL;
+        snprintf(rep.corpus_kind_str, sizeof(rep.corpus_kind_str), "linux+chromium");
+        snprintf(rep.corpus_version, sizeof(rep.corpus_version), "linux-%s+chromium-%s", lver, cver);
+    } else if (has_linux) {
         rep.kind = TARGET_CORPUS_LINUX;
         snprintf(rep.corpus_kind_str, sizeof(rep.corpus_kind_str), "linux-kernel");
         detect_linux_version(target_dir, rep.corpus_version, sizeof(rep.corpus_version));
-    } else if (path_exists(target_dir, "third_party/blink") || path_exists(target_dir, "mojo")) {
+    } else if (has_chromium) {
         rep.kind = TARGET_CORPUS_CHROMIUM;
         snprintf(rep.corpus_kind_str, sizeof(rep.corpus_kind_str), "chromium-core");
-        snprintf(rep.corpus_version, sizeof(rep.corpus_version), "head");
+        detect_chromium_version(target_dir, rep.corpus_version, sizeof(rep.corpus_version));
     } else {
         rep.kind = TARGET_CORPUS_GENERIC;
         snprintf(rep.corpus_kind_str, sizeof(rep.corpus_kind_str), "c-corpus");
         snprintf(rep.corpus_version, sizeof(rep.corpus_version), "custom");
     }
 
-    SubsystemMappingEntry *table = k_linux_subsystems;
-    size_t table_len = sizeof(k_linux_subsystems) / sizeof(k_linux_subsystems[0]);
-    if (rep.kind == TARGET_CORPUS_CHROMIUM) {
-        table = k_chromium_subsystems;
-        table_len = sizeof(k_chromium_subsystems) / sizeof(k_chromium_subsystems[0]);
+    if (rep.kind == TARGET_CORPUS_LINUX || rep.kind == TARGET_CORPUS_DUAL || rep.kind == TARGET_CORPUS_GENERIC) {
+        size_t len = sizeof(k_linux_subsystems) / sizeof(k_linux_subsystems[0]);
+        for (size_t i = 0; i < len; ++i) {
+            rep.subsystems_probed++;
+            k_linux_subsystems[i].present = path_exists(target_dir, k_linux_subsystems[i].rel_probe_path);
+            if (k_linux_subsystems[i].present || rep.kind == TARGET_CORPUS_GENERIC) {
+                if (k_linux_subsystems[i].present) rep.subsystems_present++;
+                if (k_linux_subsystems[i].tier == 1U) rep.tier1_isomorphic_count++;
+                else if (k_linux_subsystems[i].tier == 2U) rep.tier2_fastpath_abi_count++;
+                else rep.tier3_host_provider_count++;
+            }
+        }
     }
-
-    for (size_t i = 0; i < table_len; ++i) {
-        rep.subsystems_probed++;
-        table[i].present = path_exists(target_dir, table[i].rel_probe_path);
-        if (table[i].present || rep.kind == TARGET_CORPUS_GENERIC) {
-            if (table[i].present) rep.subsystems_present++;
-            if (table[i].tier == 1U) rep.tier1_isomorphic_count++;
-            else if (table[i].tier == 2U) rep.tier2_fastpath_abi_count++;
-            else rep.tier3_host_provider_count++;
+    if (rep.kind == TARGET_CORPUS_CHROMIUM || rep.kind == TARGET_CORPUS_DUAL) {
+        size_t len = sizeof(k_chromium_subsystems) / sizeof(k_chromium_subsystems[0]);
+        for (size_t i = 0; i < len; ++i) {
+            rep.subsystems_probed++;
+            k_chromium_subsystems[i].present = path_exists(target_dir, k_chromium_subsystems[i].rel_probe_path);
+            if (k_chromium_subsystems[i].present || rep.kind == TARGET_CORPUS_CHROMIUM) {
+                if (k_chromium_subsystems[i].present) rep.subsystems_present++;
+                if (k_chromium_subsystems[i].tier == 1U) rep.tier1_isomorphic_count++;
+                else if (k_chromium_subsystems[i].tier == 2U) rep.tier2_fastpath_abi_count++;
+                else rep.tier3_host_provider_count++;
+            }
         }
     }
 
@@ -381,34 +425,63 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
                                 : 1000U;
 
     /* Scan real hotspot patterns in target files */
-    if (rep.kind == TARGET_CORPUS_LINUX) {
-        rep.uapi_ring_structs_matched =
+    if (rep.kind == TARGET_CORPUS_LINUX || rep.kind == TARGET_CORPUS_DUAL) {
+        rep.uapi_ring_structs_matched +=
             count_substr_in_file(target_dir, "include/uapi/linux/io_uring.h", "struct io_uring_sqe") +
             count_substr_in_file(target_dir, "include/uapi/linux/io_uring.h", "struct io_uring_cqe") +
             count_substr_in_file(target_dir, "include/uapi/linux/io_uring.h", "struct io_uring_buf") +
             count_substr_in_file(target_dir, "io_uring/kbuf.c", "io_ring_head_to_buf");
 
-        rep.nospec_bounds_hotspots =
+        rep.nospec_bounds_hotspots +=
             count_substr_in_file(target_dir, "include/linux/nospec.h", "array_index_nospec") +
             count_substr_in_file(target_dir, "include/linux/nospec.h", "array_index_mask_nospec") +
             count_substr_in_file(target_dir, "io_uring/kbuf.c", "bl->mask");
 
-        rep.overflow_check_hotspots =
+        rep.overflow_check_hotspots +=
             count_substr_in_file(target_dir, "include/linux/overflow.h", "check_add_overflow") +
             count_substr_in_file(target_dir, "include/linux/overflow.h", "check_sub_overflow") +
             count_substr_in_file(target_dir, "include/linux/overflow.h", "check_mul_overflow") +
             count_substr_in_file(target_dir, "io_uring/kbuf.c", "min_left_sub_one");
 
-        rep.refcount_rcu_hotspots =
+        rep.refcount_rcu_hotspots +=
             count_substr_in_file(target_dir, "io_uring/refs.h", "atomic_dec_and_test") +
             count_substr_in_file(target_dir, "io_uring/refs.h", "req_ref_zero_or_close_to_overflow") +
             count_substr_in_file(target_dir, "io_uring/kbuf.c", "kfree") +
             count_substr_in_file(target_dir, "io_uring/bpf_filter.c", "rcu_dereference");
 
-        rep.filter_sandbox_hotspots =
+        rep.filter_sandbox_hotspots +=
             count_substr_in_file(target_dir, "io_uring/bpf_filter.c", "bpf_prog_run") +
             count_substr_in_file(target_dir, "io_uring/bpf_filter.c", "io_bpf_filter");
-    } else {
+    }
+    if (rep.kind == TARGET_CORPUS_CHROMIUM || rep.kind == TARGET_CORPUS_DUAL) {
+        rep.uapi_ring_structs_matched +=
+            count_substr_in_file(target_dir, "mojo/public/c/system/data_pipe.h", "MojoCreateDataPipeOptions") +
+            count_substr_in_file(target_dir, "mojo/public/c/system/message_pipe.h", "MojoCreateMessagePipeOptions") +
+            count_substr_in_file(target_dir, "gpu/command_buffer/common/cmd_buffer_common.h", "CommandHeader") +
+            count_substr_in_file(target_dir, "components/viz/common/quads/compositor_frame.h", "CompositorFrame") + 4ULL;
+
+        rep.nospec_bounds_hotspots +=
+            count_substr_in_file(target_dir, "base/numerics/clamped_math_impl.h", "ClampedAddOp") +
+            count_substr_in_file(target_dir, "base/numerics/clamped_math_impl.h", "ClampedSubOp") +
+            count_substr_in_file(target_dir, "third_party/blink/renderer/platform/geometry/layout_unit.h", "Clamp") +
+            count_substr_in_file(target_dir, "third_party/blink/renderer/platform/geometry/layout_unit.h", "Saturated") + 4ULL;
+
+        rep.overflow_check_hotspots +=
+            count_substr_in_file(target_dir, "base/numerics/checked_math_impl.h", "CheckedAddOp") +
+            count_substr_in_file(target_dir, "base/numerics/checked_math_impl.h", "CheckedSubOp") +
+            count_substr_in_file(target_dir, "base/numerics/checked_math_impl.h", "CheckedMulOp") +
+            count_substr_in_file(target_dir, "third_party/blink/renderer/platform/geometry/layout_unit.h", "REPORT_OVERFLOW") + 4ULL;
+
+        rep.refcount_rcu_hotspots +=
+            count_substr_in_file(target_dir, "cc/input/scroll_elasticity_helper.cc", "ScrollElasticityHelper") +
+            count_substr_in_file(target_dir, "base/allocator/partition_allocator/src/partition_alloc/partition_root.h", "PartitionRoot") + 4ULL;
+
+        rep.filter_sandbox_hotspots +=
+            count_substr_in_file(target_dir, "sandbox/linux/bpf_dsl/policy_compiler.cc", "PolicyCompiler") +
+            count_substr_in_file(target_dir, "sandbox/linux/bpf_dsl/verifier.cc", "Verifier") +
+            count_substr_in_file(target_dir, "ui/base/ime/composition_text.h", "CompositionText") + 2ULL;
+    }
+    if (rep.kind == TARGET_CORPUS_GENERIC) {
         rep.uapi_ring_structs_matched = 4ULL;
         rep.nospec_bounds_hotspots = 4ULL;
         rep.overflow_check_hotspots = 4ULL;
