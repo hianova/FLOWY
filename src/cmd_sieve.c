@@ -3,15 +3,21 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <ctype.h>
 #include "flow_asm.h"
 #include "flow_hott_jet.h"
 #include "flow_io.h"
 
+FLOW_QPOLY_DEFINE_EX(FusedSievePoly, 1, 16, 2)
+
+#define FLOW_FUSED_SIEVE_CANONICAL_ALL 0x3FFFULL
+
 static void print_sieve_help(void) {
-    printf("FLOWY sieve — 64-Bit Boundary Tag, 10-Bit Sieve, Wave64, QSBR & Hex128 Pullback Decoder\n\n"
+    printf("FLOWY sieve — Fused 4-Mode (ASM + Jet2 + HoTT/QPoly + QSBR) Sieve & Pullback Decoder\n\n"
            "USAGE:\n"
            "    flowy sieve [OPTIONS]\n\n"
            "OPTIONS:\n"
+           "    --fuse [input_q16]       Execute fused 4-mode (ASM+Jet2+HoTT/QPoly+QSBR) simultaneous sieve gate\n"
            "    --decode-tag <hex>       Decode raw 64-bit FlowResultU64.boundary_tag\n"
            "    --decode-sieve <mask>    Explain 10-bit FlowAsmSieveAxis bitmask\n"
            "    --homotopy <p> <q>       Check cubical Kan homotopy fill between masks\n"
@@ -39,13 +45,104 @@ static const char *violation_kind_str(uint8_t k) {
     }
 }
 
+static int run_fused_4mode_sieve(int64_t input_q16, bool json_mode) {
+    uint64_t sieve = FLOW_ASM_SIEVE_ALL_SOUND;
+
+    /* 1. Mode A (ASM): Flag-setting Q16 arithmetic & masked cyclic arena memory (Bits [0..6]) */
+    FlowResultU64 m_res = flow_asm_qmul_shift16_i64(input_q16, FLOW_Q16_ONE, &sieve);
+    FlowResultU64 a_res = flow_asm_qadd_i64((int64_t)m_res.value, 3276, &sieve);
+    (void)flow_asm_qsqrt_shift16_i64(FLOW_Q16_ONE, &sieve);
+    static _Alignas(FLOW_HW_CACHE_LINE_BYTES) uint64_t arena[8] = {0};
+    (void)flow_asm_arena_store_u64(arena, 3ULL, 7ULL, a_res.value, &sieve);
+    uint64_t l_res = flow_asm_arena_load_u64(arena, 3ULL, 7ULL, &sieve);
+    (void)l_res;
+
+    /* 2. Mode B (HoTT / QPoly): Polytope interior hysteresis & Kan cubical continuity (Bit [7]) */
+    FusedSievePoly poly;
+    FusedSievePoly_init(&poly);
+    poly.A[0][0] = 1;
+    FusedSievePoly_set_hysteresis(&poly, 0, 73728, 57344);
+    int32_t x_vec[1] = { (int32_t)((input_q16 > INT32_MAX) ? INT32_MAX : ((input_q16 < INT32_MIN) ? INT32_MIN : input_q16)) };
+    FlowQPolyEval qev = FusedSievePoly_eval_hysteresis(&poly, x_vec, 0ULL);
+    if (qev.violated_mask != 0ULL) {
+        sieve &= ~FLOW_ASM_SIEVE_QPOLY_INTERIOR;
+    }
+    uint64_t kan_next = 0;
+    if (flow_cubical_step_neighbor(sieve, 0U, ~1ULL, &kan_next) != FLOW_KAN_FILLED_HOMOTOPIC) {
+        sieve &= ~FLOW_ASM_SIEVE_DOMAIN_VALID;
+    }
+
+    /* 3. Mode C (2-Jet): Taylor 0/1 differential self-check & root solver (Bits [8..9]) */
+    FlowJet2 j0 = flow_jet2_make(input_q16, 4096, 0);
+    FlowJet2 j1 = flow_jet2_make(input_q16 + 4096, 4096, 0);
+    (void)flow_asm_jet2_self_check_step(j0, j1, FLOW_Q16_ONE, 16, 16, &sieve);
+
+    /* 4. Mode D (QSBR): Lock-free descriptor hot-swap & UMA resource sieve (Bits [10..13]) */
+    uint64_t res_sieve = 0;
+    FlowReloadContext *ctx = flow_reload_create(NULL);
+    if (ctx) {
+        FlowReloadReader rdr;
+        memset(&rdr, 0, sizeof(rdr));
+        if (flow_reload_reader_register(ctx, &rdr) == 0) {
+            (void)flow_qsbr_publish_ptr(ctx, &poly);
+            const void *loaded = flow_qsbr_load_ptr(ctx, &rdr);
+            if (loaded == &poly) {
+                res_sieve = flow_reload_resource_sieve(ctx, &rdr);
+            }
+            flow_reload_reader_unregister(&rdr);
+        }
+        flow_reload_destroy(ctx);
+    }
+
+    /* Simultaneous 1-Cycle Fused 14-Bit Judgment (ASM[0..6] | QPoly[7] | Jet2[8..9] | QSBR[10..13]) */
+    uint64_t asm_mask   = sieve & 0x7FULL;
+    uint64_t hott_mask  = (sieve >> 7U) & 0x1ULL;
+    uint64_t jet2_mask  = (sieve >> 8U) & 0x3ULL;
+    uint64_t qsbr_mask  = res_sieve & 0x0FULL;
+    uint64_t fused_mask = (sieve & FLOW_ASM_SIEVE_ALL_SOUND) | (qsbr_mask << 10U);
+    bool all_sound      = (fused_mask == FLOW_FUSED_SIEVE_CANONICAL_ALL);
+
+    if (json_mode) {
+        flowy_json_start();
+        flowy_json_field_str("mode", "fused_4mode_sieve", true);
+        flowy_json_field_i64("input_q16", input_q16, true);
+        flowy_json_field_hex64("fused_sieve_14b", fused_mask, true);
+        flowy_json_field_hex64("asm_sieve_7b", asm_mask, true);
+        flowy_json_field_u64("hott_qpoly_1b", hott_mask, true);
+        flowy_json_field_u64("jet2_taylor_2b", jet2_mask, true);
+        flowy_json_field_hex64("qsbr_resource_4b", qsbr_mask, true);
+        flowy_json_field_bool("simultaneous_sound", all_sound, false);
+        flowy_json_end();
+    } else {
+        printf("=== FLOWY Fused 4-Mode Simultaneous Sieve Gate (ASM + HoTT/QPoly + 2-Jet + QSBR) ===\n"
+               "Input Q16        : %" PRId64 "\n"
+               "Fused 14-Bit Mask: 0x%04" PRIx64 " / 0x3fff -> [%s]\n"
+               "  - [0..6]  ASM Flag & Arena Sieve : 0x%02" PRIx64 " (7/7 bits)\n"
+               "  - [7]     HoTT / QPoly Interior  : %" PRIu64 "    (1/1 bit)\n"
+               "  - [8..9]  2-Jet Taylor 0/1 Sieve : 0x%01" PRIx64 "  (2/2 bits)\n"
+               "  - [10..13] QSBR & UMA Resource   : 0x%01" PRIx64 "  (4/4 bits)\n",
+               input_q16, fused_mask, all_sound ? "SIMULTANEOUS PASS" : "BOUNDARY PULLBACK",
+               asm_mask, hott_mask, jet2_mask, qsbr_mask);
+    }
+    return all_sound ? 0 : 1;
+}
+
 int cmd_sieve_run(int argc, char **argv, bool json_mode) {
     const char *dec_tag = NULL, *dec_sieve = NULL, *hp_p = NULL, *hp_q = NULL, *quot = NULL;
     const char *wave64_str = NULL, *caps_enc = NULL, *caps_dec = NULL, *trace_spec = NULL;
-    bool probe_res = false, verify_trace = false;
+    bool probe_res = false, verify_trace = false, run_fuse = false;
+    int64_t fuse_input_q16 = FLOW_Q16_ONE;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { print_sieve_help(); return 0; }
+        else if (strncmp(argv[i], "--fuse=", 7) == 0) {
+            run_fuse = true; fuse_input_q16 = (int64_t)strtoll(argv[i] + 7, NULL, 0);
+        } else if (strcmp(argv[i], "--fuse") == 0) {
+            run_fuse = true;
+            if (i + 1 < argc && (argv[i + 1][0] != '-' || isdigit((unsigned char)argv[i + 1][1]))) {
+                fuse_input_q16 = (int64_t)strtoll(argv[++i], NULL, 0);
+            }
+        }
         else if ((strcmp(argv[i], "--decode-tag") == 0 && i + 1 < argc) || strncmp(argv[i], "--decode-tag=", 13) == 0)
             dec_tag = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
         else if ((strcmp(argv[i], "--decode-sieve") == 0 && i + 1 < argc) || strncmp(argv[i], "--decode-sieve=", 15) == 0)
@@ -66,6 +163,10 @@ int cmd_sieve_run(int argc, char **argv, bool json_mode) {
             verify_trace = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') trace_spec = argv[++i];
         }
+    }
+
+    if (run_fuse) {
+        return run_fused_4mode_sieve(fuse_input_q16, json_mode);
     }
 
     if (dec_tag) {
@@ -287,6 +388,5 @@ int cmd_sieve_run(int argc, char **argv, bool json_mode) {
         return kan_ok ? 0 : 1;
     }
 
-    print_sieve_help();
-    return 0;
+    return run_fused_4mode_sieve(fuse_input_q16, json_mode);
 }

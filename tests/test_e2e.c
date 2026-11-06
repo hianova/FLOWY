@@ -205,7 +205,9 @@ int main(void) {
     assert(strstr(jbuf, "\"b_enter_q16\": 81920") != NULL);
     assert(strstr(jbuf, "\"abi_64b_valid\": true") != NULL);
 
-    /* Verify --verify-trace rejects malformed hex, single step, trailing comma, and broken Kan step */
+    /* Verify --verify-trace rejects malformed hex, single step, trailing comma, and broken Kan step, and --fuse simultaneous 4-mode gate */
+    assert(system("./build/flowy sieve --fuse 65536 --json > build/tmp_fuse_ok.json") == 0);
+    assert(system("./build/flowy sieve --fuse 131072 > /dev/null 2>&1") != 0);
     assert(system("./build/flowy sieve --verify-trace invalid_hex > /dev/null 2>&1") != 0);
     assert(system("./build/flowy sieve --verify-trace 0x3FF,bad > /dev/null 2>&1") != 0);
     assert(system("./build/flowy sieve --verify-trace 0x3FF,0x3FE, > /dev/null 2>&1") != 0);

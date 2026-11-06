@@ -73,7 +73,8 @@ test: $(TARGET)
 	$(TARGET) diff --mode relativistic --trials 10000 --auto-cegis --json > build/diff_relativistic.json
 	$(TARGET) diff --mode arith --trials 256 --emit-corpus build/corpus_arith.bin --json > build/diff_corpus_emit.json
 	$(TARGET) diff --corpus build/corpus_arith.bin --json > build/diff_corpus_replay.json
-	# 5. Subcommand: sieve (Boundary tag, Sieve pullback, Kan Homotopy, HIT Quotient, Wave64, Hex128 Capsule & --verify-trace)
+	# 5. Subcommand: sieve (Fused 4-Mode Sieve, Boundary tag, Sieve pullback, Kan Homotopy, HIT Quotient, Wave64, Hex128 Capsule & --verify-trace)
+	$(TARGET) sieve --fuse 65536 --json > build/sieve_fused.json
 	$(TARGET) sieve --decode-tag 0x7FF8400010040000 --json > build/sieve_tag.json
 	$(TARGET) sieve --decode-sieve 0x3FF --json > build/sieve_mask.json
 	$(TARGET) sieve --homotopy 0x3FF 0x3FE --json > build/sieve_homotopy.json

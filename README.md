@@ -33,7 +33,7 @@ In the `FLOW` architecture (as implemented across [`bloom`](../bloom) and [`flow
 | **`flowy lean`** | **Lean 4 Proof Verifier, Coverage Auditor & 64B FLOW ABI Bridge** | `--verify-all <files...>`, `--from-lean <file.lean>`, `--verify`, `--emit-abi <out.bin>`, `--verify-abi <in.bin>` |
 | **`flowy diff`** | **5-Mode Algebraic Wind Tunnel, Zero-Fault Bench & 64B Corpus Replay** | `--mode <arith\|tunnel\|chatter\|conservation\|relativistic>`, `--bench`, `--auto-cegis`, `--emit-corpus <bin>`, `--corpus <bin>` |
 | **`flowy qpoly`** | **Conservative Inner Polytope Quantizer & Hysteresis Calculator** | `--dim <1..4>`, `--threshold <T>`, `--deadband <D>`, `--b-enter <E>`, `--b-exit <X>`, `--qshift-sweep`, `--auto-cegis` |
-| **`flowy sieve`** | **Boundary Tag, 10-Bit Sieve, Wave64, QSBR & Hex128 Decoder** | `--decode-tag <hex>`, `--decode-sieve <mask>`, `--homotopy <p> <q>`, `--quotient <m,e>`, `--wave64 <mask>`, `--check-qsbr`, `--capsule-encode`, `--capsule-decode`, `--verify-trace` |
+| **`flowy sieve`** | **Fused 4-Mode (ASM+Jet2+HoTT/QPoly+QSBR) Sieve & Pullback Decoder** | `--fuse [q16]`, `--decode-tag <hex>`, `--decode-sieve <mask>`, `--homotopy <p> <q>`, `--quotient <m,e>`, `--wave64 <mask>`, `--check-qsbr`, `--capsule-encode`, `--capsule-decode`, `--verify-trace` |
 
 All subcommands support `--json` for deterministic machine-readable output in CI/CD Gate 0 pipelines.
 
