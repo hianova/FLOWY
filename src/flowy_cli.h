@@ -12,6 +12,10 @@ extern "C" {
 #define FLOW_CORPUS_MAGIC   0x464C4F5743525053ULL
 #define FLOW_LEAN_ABI_MAGIC 0x464C4F574C45414EULL
 
+#ifndef FLOWY_VERSION_STRING
+#define FLOWY_VERSION_STRING "1.1.0"
+#endif
+
 /*
  * Canonical 64-Byte Binary Flight-Recorder Corpus Record
  * sizeof == 64 && _Alignof == 64, deterministic trajectory replay unit.

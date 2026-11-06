@@ -1,6 +1,6 @@
-# FLOWY — Gate 0 Cross-Layer Formal, Geometric & Hardware Auditor CLI
+# FLOWY (v1.1.0) — Gate 0 Cross-Layer Formal, Geometric & Hardware Auditor CLI
 
-`FLOWY` is the zero-dependency C11/C17 companion CLI and **Gate 0 Cross-Layer Auditor** for the `FLOW` (`libflow_rt.a`) runtime ecosystem.
+`FLOWY` (`v1.1.0`) is the zero-dependency C11/C17 companion CLI and **Gate 0 Cross-Layer Auditor** for the `FLOW` (`libflow_rt.a`) runtime ecosystem (auditing [`bloom`](../bloom), [`unit`](../unit), and [`flow_agent`](../flow_agent)).
 
 ---
 

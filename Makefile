@@ -1,5 +1,6 @@
 CC ?= cc
-CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -O3
+FLOWY_VERSION := $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo "1.1.0")
+CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -O3 -DFLOWY_VERSION_STRING=\"$(FLOWY_VERSION)\"
 FLOW_DIR ?= $(abspath ../FLOW)
 LEAN ?= $(shell command -v lean 2>/dev/null || echo $$HOME/.elan/bin/lean)
 
