@@ -175,7 +175,7 @@ static size_t resolve_array_dim_in_buf(const char *expr, const char *file_buf) {
 
 static size_t infer_field_type_size(const char *decl, size_t *out_align) {
     size_t sz = 8U, al = 8U;
-    if (strchr(decl, '*')) {
+    if (strchr(decl, '*') || strchr(decl, '&')) {
         sz = 8U;
         al = 8U;
     } else if (strstr(decl, "MinBitWave64")) {
@@ -191,25 +191,27 @@ static size_t infer_field_type_size(const char *decl, size_t *out_align) {
         sz = 16U;
         al = 8U;
     } else if (strstr(decl, "uint64_t") || strstr(decl, "int64_t") || strstr(decl, "__u64") ||
-               strstr(decl, "__s64") || strstr(decl, "u64 ") || strstr(decl, "s64 ") ||
-               strstr(decl, "ulong") || strstr(decl, "unsigned long") || strstr(decl, "long long") ||
-               strstr(decl, "size_t") || strstr(decl, "uintptr_t") || strstr(decl, "double")) {
+               strstr(decl, "__s64") || strstr(decl, "u64") || strstr(decl, "i64") ||
+               strstr(decl, "usize") || strstr(decl, "isize") || strstr(decl, "ulong") ||
+               strstr(decl, "unsigned long") || strstr(decl, "long long") ||
+               strstr(decl, "size_t") || strstr(decl, "uintptr_t") || strstr(decl, "double") ||
+               strstr(decl, "f64")) {
         sz = 8U;
         al = 8U;
     } else if (strstr(decl, "uint32_t") || strstr(decl, "int32_t") || strstr(decl, "__u32") ||
-               strstr(decl, "__s32") || strstr(decl, "u32 ") || strstr(decl, "s32 ") ||
-               strstr(decl, "atomic_t") || strstr(decl, "refcount_t") || strstr(decl, "float") ||
-               strstr(decl, "Verdict") || strstr(decl, "unsigned int") ||
+               strstr(decl, "__s32") || strstr(decl, "u32") || strstr(decl, "i32") ||
+               strstr(decl, "f32") || strstr(decl, "atomic_t") || strstr(decl, "refcount_t") ||
+               strstr(decl, "float") || strstr(decl, "Verdict") || strstr(decl, "unsigned int") ||
                strstr(decl, "int ") || strncmp(decl, "int\t", 4) == 0) {
         sz = 4U;
         al = 4U;
     } else if (strstr(decl, "uint16_t") || strstr(decl, "int16_t") || strstr(decl, "__u16") ||
-               strstr(decl, "__s16") || strstr(decl, "u16 ") || strstr(decl, "s16 ") ||
+               strstr(decl, "__s16") || strstr(decl, "u16") || strstr(decl, "i16") ||
                strstr(decl, "fp16_t") || strstr(decl, "short")) {
         sz = 2U;
         al = 2U;
     } else if (strstr(decl, "uint8_t") || strstr(decl, "int8_t") || strstr(decl, "__u8") ||
-               strstr(decl, "__s8") || strstr(decl, "u8 ") || strstr(decl, "s8 ") ||
+               strstr(decl, "__s8") || strstr(decl, "u8") || strstr(decl, "i8") ||
                strstr(decl, "char") || strstr(decl, "bool")) {
         sz = 1U;
         al = 1U;
@@ -260,10 +262,11 @@ static void parse_struct_geometries_in_buffer(const char *buf, StructuralMapRepo
 
         size_t cur_offset = 0U, max_align = forced_align, padding = 0U, bit_rem = 0U, field_cnt = 0U;
         const char *fstart = brace_open + 1;
+        char delim = memchr(fstart, ';', (size_t)(brace_close - fstart)) ? ';' : ',';
         while (fstart < brace_close) {
-            const char *semi = memchr(fstart, ';', (size_t)(brace_close - fstart));
-            if (!semi) break;
-            size_t slen = (size_t)(semi - fstart);
+            const char *sep = memchr(fstart, delim, (size_t)(brace_close - fstart));
+            if (!sep) sep = brace_close;
+            size_t slen = (size_t)(sep - fstart);
             if (slen > 0U && slen < 160U && !memchr(fstart, '(', slen)) {
                 char stmt[160] = {0};
                 memcpy(stmt, fstart, slen);
@@ -276,8 +279,12 @@ static void parse_struct_geometries_in_buffer(const char *buf, StructuralMapRepo
                     size_t base_sz = infer_field_type_size(stmt, &f_al);
                     if (f_al > max_align) max_align = f_al;
                     const char *colon = strchr(stmt, ':');
-                    if (colon && colon[1] != ':') {
-                        size_t bits = (size_t)strtoull(colon + 1, NULL, 10);
+                    const char *after_colon = colon ? (colon + 1) : NULL;
+                    while (after_colon && *after_colon && isspace((unsigned char)*after_colon)) {
+                        after_colon++;
+                    }
+                    if (colon && colon[1] != ':' && after_colon && isdigit((unsigned char)*after_colon)) {
+                        size_t bits = (size_t)strtoull(after_colon, NULL, 10);
                         if (bits > 0U && bits <= base_sz * 8U) {
                             if (bit_rem >= bits) {
                                 bit_rem -= bits;
@@ -298,8 +305,12 @@ static void parse_struct_geometries_in_buffer(const char *buf, StructuralMapRepo
                         size_t mult = 1U;
                         const char *scan = stmt;
                         while ((scan = strchr(scan, '[')) != NULL) {
-                            mult *= resolve_array_dim_in_buf(scan + 1, buf);
                             const char *cbr = strchr(scan, ']');
+                            const char *semi_in_br = strchr(scan, ';');
+                            const char *dim_expr = (semi_in_br && (!cbr || semi_in_br < cbr))
+                                                       ? (semi_in_br + 1)
+                                                       : (scan + 1);
+                            mult *= resolve_array_dim_in_buf(dim_expr, buf);
                             scan = cbr ? (cbr + 1) : (scan + 1);
                         }
                         size_t rem = cur_offset % f_al;
@@ -313,7 +324,7 @@ static void parse_struct_geometries_in_buffer(const char *buf, StructuralMapRepo
                     }
                 }
             }
-            fstart = semi + 1;
+            fstart = sep + 1;
         }
 
         if (field_cnt > 0U && cur_offset > 0U) {
@@ -374,6 +385,9 @@ static void scan_source_file(const char *filepath, StructuralMapReport *rep) {
     /* 2. Extract arithmetic, fixed-point & cyclic mask signatures */
     rep->sig_overflow_checks +=
         count_token(buf, "_overflow(") +
+        count_token(buf, "checked_add") +
+        count_token(buf, "checked_sub") +
+        count_token(buf, "checked_mul") +
         count_token(buf, "CheckedAdd") +
         count_token(buf, "CheckedSub") +
         count_token(buf, "CheckedMul") +
@@ -401,7 +415,8 @@ static void scan_source_file(const char *filepath, StructuralMapReport *rep) {
         count_token(buf, "q8_") +
         count_token(buf, "min_bit") +
         count_token(buf, "popcnt") +
-        count_token(buf, "popcount");
+        count_token(buf, "popcount") +
+        count_token(buf, "count_ones");
 
     rep->sig_cyclic_ring_masks +=
         count_token(buf, "& mask") +
@@ -413,7 +428,9 @@ static void scan_source_file(const char *filepath, StructuralMapReport *rep) {
     /* 3. Extract lock-free epoch & 2-Jet / hysteresis control signatures */
     rep->sig_atomic_epoch_sync +=
         count_token(buf, "memory_order_") +
+        count_token(buf, "Ordering::") +
         count_token(buf, "atomic_") +
+        count_token(buf, "Atomic") +
         count_token(buf, "rcu_") +
         count_token(buf, "refcount_") +
         count_token(buf, "qsbr");
@@ -422,7 +439,8 @@ static void scan_source_file(const char *filepath, StructuralMapReport *rep) {
         count_token(buf, "malloc(") +
         count_token(buf, "calloc(") +
         count_token(buf, "kfree(") +
-        count_token(buf, "free(");
+        count_token(buf, "free(") +
+        count_token(buf, "Box::new");
 
     rep->sig_dynamics_hysteresis +=
         count_token(buf, "hysteresis") +
@@ -435,7 +453,8 @@ static void scan_source_file(const char *filepath, StructuralMapReport *rep) {
     /* 4. Extract command dispatch & policy filter signatures */
     rep->sig_branchy_switch_dispatch +=
         count_token(buf, "switch (") +
-        count_token(buf, "switch(");
+        count_token(buf, "switch(") +
+        count_token(buf, "match ");
 
     rep->sig_opcode_command_streams +=
         count_token(buf, "opcode") +
@@ -457,7 +476,8 @@ static bool has_source_extension(const char *name) {
     return strcmp(dot, ".h") == 0 || strcmp(dot, ".hpp") == 0 ||
            strcmp(dot, ".c") == 0 || strcmp(dot, ".cc") == 0 ||
            strcmp(dot, ".cpp") == 0 || strcmp(dot, ".m") == 0 ||
-           strcmp(dot, ".mm") == 0 || strcmp(dot, ".metal") == 0;
+           strcmp(dot, ".mm") == 0 || strcmp(dot, ".metal") == 0 ||
+           strcmp(dot, ".rs") == 0 || strcmp(dot, ".inc") == 0;
 }
 
 static void walk_directory_recursive(const char *dir_path, StructuralMapReport *rep, int depth) {
