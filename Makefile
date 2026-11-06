@@ -96,7 +96,7 @@ test: $(TARGET)
 	$(TARGET) sieve --capsule-encode "FLOW_UNIVALENT_CAPSULE_PAYLOAD" --json > build/capsule_enc.json
 	$(TARGET) sieve --capsule-decode 464c4f575f554e4956414c454e545f43415053554c455f5041594c4f4144000000000000000000000000000000000000000000000000000079c33513c3dc78b6 --json > build/capsule_dec.json
 	$(TARGET) sieve --verify-trace 0x3FF,0x3FE,0x3FC,0x3FF --json > build/sieve_trace.json
-	# 6. Subcommand: map (Cross-Ecosystem Target Corpus Mapper for Linux flux / Chromium Core)
+	# 6. Subcommand: map (Pure Syntax & Struct-Geometry Corpus Mapper)
 	$(TARGET) map . --check-gaps --json > build/map_self.json
 	# 7. End-to-end integration test runner (including dynamic .lean -> 64B FLOW ABI verification)
 	$(CC) $(CFLAGS) $(INCLUDES) tests/test_e2e.c src/flowy_cli.c -o build/test_e2e $(LDFLAGS)
