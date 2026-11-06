@@ -7,42 +7,57 @@
 #include "flow_hott_jet.h"
 #include "flow_io.h"
 
-/* Include headers synthesized by flowy lean & flowy qpoly */
-#include "../build/flow_direct_unit_abi.h"
-#include "../build/flow_compiled_route.h"
-#include "../build/tmp_governor.h"
+typedef struct {
+    _Alignas(64) uint32_t abi_version;
+    uint32_t route_op_mask;
+    int64_t  b_enter_q16;
+    int64_t  b_exit_q16;
+    uint64_t req_mask;
+    uint64_t req_values;
+    int32_t  weight_q16;
+    uint32_t qshift;
+    uint64_t constraint_hash;
+    uint64_t state_mac;
+} TestRouteDesc64;
 
+FLOW_STATIC_ASSERT_UNIVALENT(FlowCorpusRecord64, TestRouteDesc64);
+FLOW_QPOLY_DEFINE_EX(TestGovernorPoly, 1, 16, 4)
 FLOW_SPSC_DEFINE(TestRing, uint64_t, 16)
 
 int main(void) {
-    printf("[E2E Test] Starting FLOWY (Lean 4 <-> C11/C17 ABI <-> LLVM/FLOW ASM) verification...\n");
+    printf("[E2E Test] Starting FLOWY Gate 0 & Wind-Tunnel (Lean 4 <-> C11/C17 64B ABI <-> LLVM/FLOW ASM) verification...\n");
 
-    /* 1. Verify FlowBusinessRoute64 & Lean-Synthesized 64B Cache-Line Univalence */
-    _Static_assert(sizeof(FlowBusinessRoute64) == 64, "FlowBusinessRoute64 size must be 64 bytes");
-    _Static_assert(_Alignof(FlowBusinessRoute64) == 64, "FlowBusinessRoute64 align must be 64 bytes");
-    FLOW_STATIC_ASSERT_UNIVALENT(FlowBusinessRoute64, FlowCanonicalState64);
-    assert(FLOW_VERIFIED_THEOREM_COUNT >= 10U);
-    FlowCanonicalState64 s0 = { .reserveA = 1000, .reserveB = 500 };
-    FlowCanonicalState64 s1 = { .reserveA = 800,  .reserveB = 700 };
-    assert(flow_verify_state_transition(&s0, &s1) == 1);
-    printf("  [PASS] FlowBusinessRoute64, FlowCanonicalState64 64B Univalence & State-Transition Invariant\n");
+    /* 1. Verify 64-Byte Cache-Line Univalence */
+    _Static_assert(sizeof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 size must be 64 bytes");
+    _Static_assert(_Alignof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 align must be 64 bytes");
+    _Static_assert(sizeof(TestRouteDesc64) == 64, "TestRouteDesc64 size must be 64 bytes");
+    _Static_assert(_Alignof(TestRouteDesc64) == 64, "TestRouteDesc64 align must be 64 bytes");
+    printf("  [PASS] FlowCorpusRecord64 & TestRouteDesc64 64-Byte Cache-Line Univalence\n");
 
-    /* 2. Verify Synthesized QPoly Hysteresis Governor Header (build/tmp_governor.h) */
-    FlowGovernorPoly gov;
-    flow_governor_setup(&gov);
-    assert(gov.A[0][0] == 1 && GOVERNOR_QUANTIZED_A0 != 0);
-    int32_t x_low[1]  = { (int32_t)(GOVERNOR_B_EXIT - 1000) };
-    int32_t x_high[1] = { (int32_t)(GOVERNOR_B_ENTER + 1000) };
-    int32_t x_band[1] = { (int32_t)((GOVERNOR_B_ENTER + GOVERNOR_B_EXIT) / 2) };
-    FlowQPolyEval e0 = FlowGovernorPoly_eval_hysteresis(&gov, x_low, 0ULL);
+    /* 2. Verify QPoly Inner Quantization & Hysteresis Trip/Hold/Release Invariant */
+    int64_t a_num[1] = {1}, b_num[1] = {65536}, box_min[1] = {-1000000}, box_max[1] = {1000000};
+    int32_t a_q[1] = {0};
+    int64_t b_q[1] = {0};
+    assert(flow_qpoly_quantize_inner(1, 1, 16, a_num, b_num, 1, box_min, box_max, a_q, b_q));
+    assert(a_q[0] != 0);
+
+    TestGovernorPoly gov;
+    TestGovernorPoly_init(&gov);
+    gov.A[0][0] = 1;
+    int64_t b_enter = 69632, b_exit = 61440;
+    TestGovernorPoly_set_hysteresis(&gov, 0, b_enter, b_exit);
+    int32_t x_low[1]  = { (int32_t)(b_exit - 1000) };
+    int32_t x_high[1] = { (int32_t)(b_enter + 1000) };
+    int32_t x_band[1] = { (int32_t)((b_enter + b_exit) / 2) };
+    FlowQPolyEval e0 = TestGovernorPoly_eval_hysteresis(&gov, x_low, 0ULL);
     assert(e0.violated_mask == 0ULL);
-    FlowQPolyEval e1 = FlowGovernorPoly_eval_hysteresis(&gov, x_high, e0.violated_mask);
+    FlowQPolyEval e1 = TestGovernorPoly_eval_hysteresis(&gov, x_high, e0.violated_mask);
     assert(e1.violated_mask == 1ULL);
-    FlowQPolyEval e2 = FlowGovernorPoly_eval_hysteresis(&gov, x_band, e1.violated_mask);
+    FlowQPolyEval e2 = TestGovernorPoly_eval_hysteresis(&gov, x_band, e1.violated_mask);
     assert(e2.violated_mask == 1ULL); /* Holds in deadband without chatter */
-    FlowQPolyEval e3 = FlowGovernorPoly_eval_hysteresis(&gov, x_low, e2.violated_mask);
+    FlowQPolyEval e3 = TestGovernorPoly_eval_hysteresis(&gov, x_low, e2.violated_mask);
     assert(e3.violated_mask == 0ULL); /* Releases below b_exit */
-    printf("  [PASS] Synthesized FlowGovernorPoly Hysteresis Trip/Hold/Release Invariant\n");
+    printf("  [PASS] QPoly Inner Quantization & Hysteresis Trip/Hold/Release Invariant\n");
 
     /* 3. Verify FlowResultU64 boundary tag tagging & extraction */
     uint64_t tag = flow_hott_make_boundary_tag(0x101, 1, (uint8_t)FLOW_BOUNDARY_DOMAIN_SINGULARITY, 3, 42);
@@ -71,24 +86,26 @@ int main(void) {
     assert(TestRing_size(&ring) == 0);
     printf("  [PASS] FLOW SPSC Ring Invariants\n");
 
-    /* 6. Verify Stage 1 Shadow Tap Logic: dual-track mirror catching overflow */
+    /* 6. Verify Hardware Sieve & Dietz Midpoint Boundary Healing */
     int64_t a_ovf = INT64_MAX - 10;
     int64_t b_ovf = 20;
-    int64_t naive_res = (a_ovf + b_ovf) / 2;
     int64_t dietz_res = (a_ovf & b_ovf) + ((a_ovf ^ b_ovf) >> 1);
     uint64_t s_sieve = FLOW_ASM_SIEVE_ALL_SOUND;
     FlowResultU64 s_add = flow_asm_qadd_i64(a_ovf, b_ovf, &s_sieve);
     assert(flow_result_u64_is_boundary(s_add));
-    assert(naive_res < 0); /* Naive C overflowed into negative */
-    assert(dietz_res > 0); /* Dietz healed and preserved positive midpoint */
-    printf("  [PASS] Stage 1 Shadow Tap Dual-Track Healed Anomaly Invariant\n");
+    assert((s_sieve & FLOW_ASM_SIEVE_INT_NO_OVERFLOW) == 0);
+    assert(dietz_res > 0);
+    printf("  [PASS] Hardware Sieve Pullback & Dietz Midpoint Boundary Healing Invariant\n");
 
-    /* 7. Verify Stage 2 & 3: Lean-Compiled Route & Live QSBR Hot-Swap without C recompile */
-    uint64_t expected_mac = flowy_hash64(&g_lean_certified_route,
-                                         offsetof(FlowBusinessRoute64, state_mac),
-                                         FLOW_GOLDEN_RATIO_64);
-    assert(g_lean_certified_route.state_mac == expected_mac);
-    assert(g_lean_certified_route.constraint_hash == FLOW_CONSTRAINT_HASH);
+    /* 7. Verify Live QSBR 64B Descriptor Hot-Swap without C Recompilation */
+    TestRouteDesc64 route_v1 = {
+        .abi_version = 4, .route_op_mask = 0x0DU,
+        .b_enter_q16 = 73728, .b_exit_q16 = 57344,
+        .req_mask = 0x0FULL, .req_values = 0x05ULL,
+        .weight_q16 = 3276, .qshift = 16,
+        .constraint_hash = 0x51C31A7000000002ULL, .state_mac = 0
+    };
+    route_v1.state_mac = flowy_hash64(&route_v1, offsetof(TestRouteDesc64, state_mac), FLOW_GOLDEN_RATIO_64);
 
     FlowReloadContext *ctx = flow_reload_create(NULL);
     assert(ctx != NULL);
@@ -96,37 +113,39 @@ int main(void) {
     memset(&reader, 0, sizeof(reader));
     assert(flow_reload_reader_register(ctx, &reader) == 0);
 
-    assert(flow_qsbr_publish_ptr(ctx, &g_lean_certified_route) == 0);
-    const FlowBusinessRoute64 *loaded1 = (const FlowBusinessRoute64 *)flow_qsbr_load_ptr(ctx, &reader);
-    assert(loaded1 == &g_lean_certified_route);
+    assert(flow_qsbr_publish_ptr(ctx, &route_v1) == 0);
+    const TestRouteDesc64 *loaded1 = (const TestRouteDesc64 *)flow_qsbr_load_ptr(ctx, &reader);
+    assert(loaded1 == &route_v1);
     assert(loaded1->weight_q16 == 3276);
 
-    /* Hot-swap to Lean Business Route Bank v2 in memory (0 downtime, 0 C recompilation) */
-    FlowBusinessRoute64 route_v2 = g_lean_certified_route;
-    route_v2.weight_q16 = 6553; /* 10% fee */
-    route_v2.state_mac = flowy_hash64(&route_v2, offsetof(FlowBusinessRoute64, state_mac), FLOW_GOLDEN_RATIO_64);
+    TestRouteDesc64 route_v2 = route_v1;
+    route_v2.weight_q16 = 6553;
+    route_v2.state_mac = flowy_hash64(&route_v2, offsetof(TestRouteDesc64, state_mac), FLOW_GOLDEN_RATIO_64);
 
     assert(flow_qsbr_publish_ptr(ctx, &route_v2) == 0);
     flow_qsbr_checkpoint(&reader);
-    const FlowBusinessRoute64 *loaded2 = (const FlowBusinessRoute64 *)flow_qsbr_load_ptr(ctx, &reader);
+    const TestRouteDesc64 *loaded2 = (const TestRouteDesc64 *)flow_qsbr_load_ptr(ctx, &reader);
     assert(loaded2 == &route_v2);
     assert(loaded2->weight_q16 == 6553);
 
     assert(flow_reload_reader_unregister(&reader) == 0);
     assert(flow_reload_destroy(ctx) == 0);
-    printf("  [PASS] Stage 3 Live QSBR Route Hot-Swap Invariant (0 Downtime, 0 Recompile)\n");
+    printf("  [PASS] Live QSBR 64B Descriptor Hot-Swap Invariant (0 Downtime, 0 Recompile)\n");
 
-    /* 8. Verify Transitive Orphan-Def Audit, Multi-Line Def Parsing & Trace Validation */
+    /* 8. Verify Transitive Orphan-Def Audit, Comment-Aware Sorry Filter & Trace Validation */
     FILE *tf = fopen("build/tmp_orphan_chain.lean", "w");
     assert(tf != NULL);
-    fprintf(tf, "def orphan_a : Nat := 10\n"
+    fprintf(tf, "-- Comment mentioning sorry and sorryAx should be ignored by parser\n"
+                "/- Nested block comment mentioning sorryAx -/\n"
+                "def orphan_a : Nat := 10\n"
                 "def orphan_b : Nat := orphan_a + 20\n"
                 "def b_enter_q16 : Int\n"
                 "  := 81920\n"
                 "def covered_caller : Int := b_enter_q16\n"
                 "theorem thm_ok : covered_caller > 0 := by decide\n");
     fclose(tf);
-    assert(system("./build/flowy lean --from-lean build/tmp_orphan_chain.lean --compile-route build/tmp_multiline_route.h --json > build/tmp_orphan.json") == 0);
+    assert(system("./build/flowy lean --from-lean build/tmp_orphan_chain.lean --json > build/tmp_orphan.json") == 0);
+    assert(system("./build/flowy lean --verify-all build/tmp_orphan_chain.lean --json > build/tmp_batch_lean.json") == 0);
     FILE *jf = fopen("build/tmp_orphan.json", "r");
     assert(jf != NULL);
     char jbuf[1024] = {0};
@@ -135,12 +154,6 @@ int main(void) {
     assert(strstr(jbuf, "\"def_count\": 4") != NULL);
     assert(strstr(jbuf, "\"covered_defs\": 2") != NULL);
     assert(strstr(jbuf, "\"orphan_defs\": 2") != NULL);
-    FILE *rf = fopen("build/tmp_multiline_route.h", "r");
-    assert(rf != NULL);
-    char rbuf[1024] = {0};
-    (void)fread(rbuf, 1, sizeof(rbuf) - 1, rf);
-    fclose(rf);
-    assert(strstr(rbuf, ".b_enter_q16 = 81920LL") != NULL);
 
     /* Verify --verify-trace rejects malformed hex, single step, trailing comma, and broken Kan step */
     assert(system("./build/flowy sieve --verify-trace invalid_hex > /dev/null 2>&1") != 0);
@@ -148,12 +161,9 @@ int main(void) {
     assert(system("./build/flowy sieve --verify-trace 0x3FF,0x3FE, > /dev/null 2>&1") != 0);
     assert(system("./build/flowy sieve --verify-trace 0x3FF > /dev/null 2>&1") != 0);
     assert(system("./build/flowy sieve --verify-trace 0x3FF,0x000 > /dev/null 2>&1") != 0);
-    printf("  [PASS] Transitive Orphan-Def Audit, Multi-Line Def & Trace Validation Invariants\n");
+    printf("  [PASS] Transitive Orphan-Def Audit, Comment-Aware Sorry Filter & Trace Validation Invariants\n");
 
-    /* 9. Verify --mca, --bench, 64B Binary Corpus Replay, Zero-Copy FFI Views & Project Scaffolder */
-    _Static_assert(sizeof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 size must be 64 bytes");
-    _Static_assert(_Alignof(FlowCorpusRecord64) == 64, "FlowCorpusRecord64 align must be 64 bytes");
-
+    /* 9. Verify --mca, --bench & 64B Binary Corpus Replay */
     FILE *sf = fopen("build/slice_test.json", "r");
     assert(sf != NULL);
     char sbuf[2048] = {0};
@@ -161,7 +171,6 @@ int main(void) {
     fclose(sf);
     assert(strstr(sbuf, "\"mca_instructions\":") != NULL);
     assert(strstr(sbuf, "\"mca_est_cycles\":") != NULL);
-    /* Verify single-iteration cycle count is not 100x inflated */
     const char *inst_p = strstr(sbuf, "\"mca_instructions\":");
     const char *cyc_p  = strstr(sbuf, "\"mca_est_cycles\":");
     assert(inst_p && cyc_p);
@@ -261,42 +270,7 @@ int main(void) {
         fclose(tf_bad);
         assert(system("./build/flowy diff --corpus build/tmp_bad_tunnel_sieve.bin > /dev/null 2>&1") != 0);
     }
-
-    /* Verify --emit-ffi rejects unsupported extension and emits valid .py/.ts/.swift views */
-    assert(flowy_emit_ffi_view("build/tmp_invalid.bad", "FlowState64", 73728, 57344, 16) != 0);
-    FILE *ts_f = fopen("build/flow_state.ts", "r");
-    assert(ts_f != NULL);
-    char ts_buf[1024] = {0};
-    (void)fread(ts_buf, 1, sizeof(ts_buf) - 1, ts_f);
-    fclose(ts_f);
-    assert(strstr(ts_buf, "BYTE_LENGTH = 64") != NULL);
-
-    FILE *sw_f = fopen("build/flow_state.swift", "r");
-    assert(sw_f != NULL);
-    char sw_buf[1024] = {0};
-    (void)fread(sw_buf, 1, sizeof(sw_buf) - 1, sw_f);
-    fclose(sw_f);
-    assert(strstr(sw_buf, "@frozen") != NULL && strstr(sw_buf, "== 64") != NULL);
-
-    /* Verify scaffolded project from `flowy init` (including trailing slash normalization and file rejection) */
-    assert(system("./build/flowy init build/tmp_scaffold_proj/// --json > build/tmp_init_slash.json") == 0);
-    FILE *isf = fopen("build/tmp_init_slash.json", "r");
-    assert(isf != NULL);
-    char isbuf[1024] = {0};
-    (void)fread(isbuf, 1, sizeof(isbuf) - 1, isf);
-    fclose(isf);
-    assert(strstr(isbuf, "\"target_dir\": \"build/tmp_scaffold_proj\"") != NULL);
-    assert(system("./build/flowy init build/tmp_init_slash.json > /dev/null 2>&1") != 0);
-
-    assert(system("./build/flowy slice build/tmp_scaffold_proj/include/project_state.h --audit-all --json > build/tmp_init_slice.json") == 0);
-    assert(system("./build/flowy lean --from-lean build/tmp_scaffold_proj/lean/Spec.lean --json > build/tmp_init_lean.json") == 0);
-    FILE *ilf = fopen("build/tmp_init_lean.json", "r");
-    assert(ilf != NULL);
-    char ilbuf[1024] = {0};
-    (void)fread(ilbuf, 1, sizeof(ilbuf) - 1, ilf);
-    fclose(ilf);
-    assert(strstr(ilbuf, "\"orphan_defs\": 0") != NULL);
-    printf("  [PASS] MCA/Bench Gate, 64B Corpus Replay, Zero-Copy FFI Views & Project Scaffolder\n");
+    printf("  [PASS] MCA/Bench Gate & 64B Binary Corpus Replay Invariants\n");
 
     printf("[E2E Test] All 9 integration & cross-layer univalence gates passed!\n");
     return 0;

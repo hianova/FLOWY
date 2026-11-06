@@ -17,147 +17,17 @@ typedef struct {
     int cur_def_idx;
     size_t field_count, theorem_count, def_count, covered_defs, orphan_defs;
     bool has_sorry, in_theorem;
-    uint32_t route_op_mask, qshift;
-    int64_t b_enter_q16, b_exit_q16;
-    uint64_t req_mask, req_values;
-    int32_t weight_q16;
 } LeanSpecExtract;
 
 static void print_lean_help(void) {
-    printf("FLOWY lean — HoTT Contract, Integer-Lattice Proof Mint & Lean SSOT Route Compiler\n\n"
+    printf("FLOWY lean — Lean 4 Formal Proof Verifier & Transitive Definition Coverage Auditor\n\n"
            "USAGE:\n    flowy lean [OPTIONS] [spec.lean...]\n\n"
            "OPTIONS:\n"
-           "    --from-lean <in.lean>        Ingest existing Lean 4 SSOT specification\n"
-           "    --emit-lean <out.lean>       Generate canonical self-contained Lean 4 theorem module\n"
+           "    --from-lean <in.lean>        Audit existing Lean 4 SSOT specification (default: lean/FlowContract.lean)\n"
            "    --verify                     Invoke Lean 4 kernel to verify proofs (0 sorryAx)\n"
-           "    --verify-all <files...>      Batch verify multiple Lean 4 specifications in parallel\n"
-           "    --transition                 Synthesize & verify state-transition step invariants\n"
-           "    --mint-abi <out.h>           Mint FlowUnit ABI hashes & 64B Univalent C struct from Lean\n"
-           "    --compile-route <out.h>      Compile Lean-certified constants into FlowBusinessRoute64 header\n"
-           "    --emit-metal <out.metal>     Emit 64B Univalent Metal Shading Language buffer header\n"
-           "    --emit-wgsl <out.wgsl>       Emit 64B Univalent WebGPU Shading Language uniform buffer\n"
-           "    --emit-ffi <out.py|.ts|.swift> Emit 64B Zero-Copy FFI memory view\n"
-           "    --json                       Deterministic JSON output for Agent consumption\n"
+           "    --verify-all <files...>      Batch audit & verify multiple Lean 4 specifications in parallel\n"
+           "    --json                       Deterministic JSON output for Agent / CI Gate 0 consumption\n"
            "    -h, --help                   Print help information\n");
-}
-
-static int run_batch_lean_verify(const char **files, size_t count, bool json_mode) {
-    if (count == 0) {
-        fprintf(stderr, "Error: --verify-all requires at least one .lean file\n");
-        return 1;
-    }
-    printf("=== FLOWY Lean 4 Batch Verification (Parallel Kernel) ===\n");
-    printf("▶ Checking %zu Lean specification(s)...\n", count);
-
-    /* 1. Fast sorry scan */
-    for (size_t i = 0; i < count; ++i) {
-        FILE *f = fopen(files[i], "rb");
-        if (!f) {
-            fprintf(stderr, "Error: cannot open Lean file: %s\n", files[i]);
-            return 1;
-        }
-        char buf[4096];
-        size_t n;
-        while ((n = fread(buf, 1, sizeof(buf) - 1, f)) > 0) {
-            buf[n] = '\0';
-            if (strstr(buf, "sorryAx") || strstr(buf, "sorry")) {
-                fclose(f);
-                fprintf(stderr, "Error: sorry axiom detected in %s! Aborting.\n", files[i]);
-                return 1;
-            }
-        }
-        fclose(f);
-    }
-
-    /* 2. Launch lean processes in parallel */
-    pid_t pids[64];
-    for (size_t i = 0; i < count && i < 64; ++i) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            freopen("/dev/null", "w", stdout);
-            freopen("/dev/null", "w", stderr);
-            execlp("lean", "lean", files[i], (char *)NULL);
-            const char *home = getenv("HOME");
-            if (home) {
-                char elan_lean[512];
-                snprintf(elan_lean, sizeof(elan_lean), "%s/.elan/bin/lean", home);
-                execl(elan_lean, "lean", files[i], (char *)NULL);
-            }
-            _exit(127);
-        } else if (pid < 0) {
-            fprintf(stderr, "Error: fork failed for %s\n", files[i]);
-            return 1;
-        }
-        pids[i] = pid;
-    }
-
-    int failures = 0;
-    for (size_t i = 0; i < count && i < 64; ++i) {
-        int status = 0;
-        waitpid(pids[i], &status, 0);
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            fprintf(stderr, "✗ Lean 4 Kernel rejected: %s (exit code %d)\n", files[i], WEXITSTATUS(status));
-            failures++;
-        } else {
-            printf("  ✓ Verified: %s (0 sorryAx)\n", files[i]);
-        }
-    }
-
-    if (failures > 0) {
-        fprintf(stderr, "Error: %d / %zu Lean 4 proofs failed verification.\n", failures, count);
-        return 1;
-    }
-
-    printf("✓ Lean 4 Batch Verification: %zu / %zu files certified sound (0 sorryAx)!\n", count, count);
-    if (json_mode) {
-        flowy_json_start();
-        flowy_json_field_str("subcommand", "lean_batch", true);
-        flowy_json_field_u64("verified_count", count, true);
-        flowy_json_field_bool("sound", true, false);
-        flowy_json_end();
-    }
-    return 0;
-}
-
-static int generate_lean_source(const char *lean_path) {
-    FILE *f = fopen(lean_path, "w");
-    if (!f) return -1;
-    fprintf(f, "import Init.Data.BitVec\nopen BitVec\n\n"
-               "/-! ## Lean Business SSOT State & Route Specification Constants -/\n"
-               "structure FlowCanonicalState where\n"
-               "  reserveA      : Nat\n  reserveB      : Nat\n  m0Vault       : Nat\n  iouSupply     : Nat\n"
-               "  harbergerPool : Nat\n  burnedSupply  : Nat\n  assemblyDepth : Nat\n  thermalKelvin : Nat\n\n"
-               "def route_op_mask   : UInt32 := 0x0000000D  -- QPOLY | JET2 | QARITH\n"
-               "def b_enter_q16     : Int    := 73728       -- 1.125 in Q16\n"
-               "def b_exit_q16      : Int    := 57344       -- 0.875 in Q16\n"
-               "def req_mask        : UInt64 := 0x000000000000000F\n"
-               "def req_values      : UInt64 := 0x0000000000000005\n"
-               "def weight_q16      : Int32  := 3276        -- 0.05 fee in Q16\n"
-               "def qshift          : UInt32 := 16\n\n"
-               "/-! ## Pillar 1: BitVec 64 Vulnerability Healing Witness -/\n"
-               "def max_i64 : BitVec 64 := 0x7FFFFFFFFFFFFFFF#64\n"
-               "def naive_add (a b : BitVec 64) : BitVec 64 := a + b\n"
-               "def dietz_midpoint (a b : BitVec 64) : BitVec 64 := (a &&& b) + ((a ^^^ b) >>> 1)\n\n"
-               "theorem naive_overflow_witness : naive_add max_i64 max_i64 = 0xFFFFFFFFFFFFFFFE#64 := by rfl\n"
-               "theorem vuln_healed_witness : dietz_midpoint max_i64 max_i64 = max_i64 := by rfl\n"
-               "theorem boundary_sound (x : BitVec 64) : (x &&& x) = x := by simp\n"
-               "theorem interior_equiv (a b : BitVec 64) (h : a = b) : dietz_midpoint a b = a := by\n"
-               "  subst h\n  simp [dietz_midpoint]\n\n"
-               "/-! ## Pillar 2: Perspective Cross-Section & Parallax Precision -/\n"
-               "def F : Nat := 3326\n"
-               "abbrev sliceSafe (X d Z : Nat) : Prop := 2 * F * X * d < Z * (Z + d)\n\n"
-               "theorem ship_at_1km_ok      : sliceSafe 10000 10000 1000000 := by decide\n"
-               "theorem ship_at_500m_breaks : ¬ sliceSafe 10000 10000 500000 := by decide\n"
-               "theorem thin_at_500m_ok     : sliceSafe 10000 2000 500000 := by decide\n\n"
-               "/-! ## Pillar 3: Integer-Lattice Conservation & State-Transition Invariants (by omega) -/\n"
-               "theorem tax_split_conservation (total fee : Int) : fee + (total - fee) = total := by omega\n"
-               "theorem split_70_30_conservation (tax : Nat) : (tax * 7000) / 10000 + (tax - (tax * 7000) / 10000) = tax := by omega\n"
-               "theorem anti_tunneling_swept_invariant (a b L : Int) (h : L >= (b - a) + 2) : L > (b - a) := by omega\n"
-               "theorem hysteresis_deadband_well_ordered : b_exit_q16 < b_enter_q16 := by decide\n"
-               "theorem route_config_well_formed : route_op_mask > 0 ∧ qshift = 16 ∧ weight_q16 > 0 ∧ (req_values &&& req_mask) = req_values := by decide\n"
-               "theorem transition_step_conserved (s0 delta : Nat) (h : delta <= s0) : (s0 - delta) + delta = s0 := by omega\n");
-    fclose(f);
-    return 0;
 }
 
 static void mark_referenced_defs(const char *haystack, LeanSpecExtract *ext, int caller_def_idx) {
@@ -179,18 +49,6 @@ static void mark_referenced_defs(const char *haystack, LeanSpecExtract *ext, int
             p += dlen;
         }
     }
-}
-
-static void extract_def_constant(const char *dname, const char *v, LeanSpecExtract *ext) {
-    while (*v && isspace((unsigned char)*v)) v++;
-    if (!*v) return;
-    if (strcmp(dname, "route_op_mask") == 0) ext->route_op_mask = (uint32_t)strtoul(v, NULL, 0);
-    else if (strcmp(dname, "b_enter_q16") == 0) ext->b_enter_q16 = strtoll(v, NULL, 0);
-    else if (strcmp(dname, "b_exit_q16") == 0) ext->b_exit_q16 = strtoll(v, NULL, 0);
-    else if (strcmp(dname, "req_mask") == 0) ext->req_mask = (uint64_t)strtoull(v, NULL, 0);
-    else if (strcmp(dname, "req_values") == 0) ext->req_values = (uint64_t)strtoull(v, NULL, 0);
-    else if (strcmp(dname, "weight_q16") == 0) ext->weight_q16 = (int32_t)strtol(v, NULL, 0);
-    else if (strcmp(dname, "qshift") == 0) ext->qshift = (uint32_t)strtoul(v, NULL, 0);
 }
 
 static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract *ext) {
@@ -232,7 +90,6 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
                 ext->cur_def_idx = idx;
                 if (assign) {
                     mark_referenced_defs(assign + 2, ext, idx);
-                    extract_def_constant(dname, assign + 2, ext);
                 }
             }
         }
@@ -242,7 +99,6 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
         const char *assign = strstr(t, ":=");
         if (assign) {
             mark_referenced_defs(assign + 2, ext, ext->cur_def_idx);
-            extract_def_constant(ext->def_names[ext->cur_def_idx], assign + 2, ext);
         } else {
             mark_referenced_defs(t, ext, ext->cur_def_idx);
         }
@@ -252,13 +108,6 @@ static void process_lean_line(const char *line, bool *in_struct, LeanSpecExtract
 static int parse_lean_spec_stream(const char *path, LeanSpecExtract *ext, uint64_t *out_hash) {
     memset(ext, 0, sizeof(*ext));
     ext->cur_def_idx = -1;
-    ext->route_op_mask = FLOW_ROUTE_QPOLY | FLOW_ROUTE_JET2 | FLOW_ROUTE_QARITH;
-    ext->b_enter_q16 = 73728;
-    ext->b_exit_q16 = 57344;
-    ext->req_mask = 0x0FULL;
-    ext->req_values = 0x05ULL;
-    ext->weight_q16 = 3276;
-    ext->qshift = 16;
 
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
@@ -369,76 +218,95 @@ static int parse_lean_spec_stream(const char *path, LeanSpecExtract *ext, uint64
     return 0;
 }
 
-static int mint_flow_abi_header(const char *abi_path, uint64_t s_hash, uint64_t c_hash,
-                                uint64_t cap_hash, const LeanSpecExtract *ext) {
-    FILE *f = fopen(abi_path, "w");
-    if (!f) return -1;
-    const char *sname = ext->struct_name[0] ? ext->struct_name : "FlowLeanState";
-    size_t sl = strlen(sname);
-    const char *suf = (sl >= 2 && strcmp(sname + sl - 2, "64") == 0) ? "" : "64";
-    fprintf(f, "/* Minted by FLOWY lean with 0 sorryAx */\n"
-               "#ifndef FLOW_DIRECT_UNIT_ABI_H\n#define FLOW_DIRECT_UNIT_ABI_H\n\n#include <stdint.h>\n\n"
-               "#define FLOW_SEMANTIC_SCHEMA_HASH   0x%016" PRIx64 "ULL\n"
-               "#define FLOW_CONSTRAINT_HASH        0x%016" PRIx64 "ULL\n"
-               "#define FLOW_CAPABILITY_HASH        0x%016" PRIx64 "ULL\n"
-               "#define FLOW_VERIFIED_THEOREM_COUNT %zuU\n\n"
-               "/* 64-Byte Cache-Line Univalent State synthesized from Lean structure '%s' */\n"
-               "typedef struct {\n    _Alignas(64) uint64_t %s;\n",
-            s_hash, c_hash, cap_hash, ext->theorem_count, sname,
-            ext->field_count > 0 ? ext->field_names[0] : "slot_0");
-    for (size_t i = 1; i < 8; ++i) {
-        if (i < ext->field_count) fprintf(f, "    uint64_t %s;\n", ext->field_names[i]);
-        else fprintf(f, "    uint64_t reserved_%zu;\n", i);
+static int run_batch_lean_verify(const char **files, size_t count, bool json_mode) {
+    if (count == 0) {
+        fprintf(stderr, "Error: --verify-all requires at least one .lean file\n");
+        return 1;
     }
-    fprintf(f, "} %s%s;\n\n#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)\n"
-               "_Static_assert(sizeof(%s%s) == 64, \"%s%s must be 64 bytes\");\n"
-               "_Static_assert(_Alignof(%s%s) == 64, \"%s%s must be 64-byte aligned\");\n"
-               "#endif\n\n"
-               "static inline int flow_verify_state_transition(const %s%s *prev, const %s%s *next) {\n"
-               "    if (!prev || !next) return 0;\n"
-               "    const uint64_t *p = (const uint64_t *)prev, *n = (const uint64_t *)next;\n"
-               "    return (p[0] + p[1]) == (n[0] + n[1]);\n"
-               "}\n\n"
-               "#endif /* FLOW_DIRECT_UNIT_ABI_H */\n",
-            sname, suf, sname, suf, sname, suf, sname, suf, sname, suf, sname, suf, sname, suf);
-    fclose(f);
-    return 0;
-}
+    if (!json_mode) {
+        printf("=== FLOWY Lean 4 Batch Verification (Parallel Kernel) ===\n");
+        printf("▶ Checking %zu Lean specification(s)...\n", count);
+    }
 
-static int compile_business_route_header(const char *out_path, uint64_t constraint_hash, const LeanSpecExtract *ext) {
-    FILE *f = fopen(out_path, "w");
-    if (!f) return -1;
-    FlowBusinessRoute64 r;
-    memset(&r, 0, sizeof(r));
-    r.abi_version = 4; r.route_op_mask = ext->route_op_mask;
-    r.b_enter_q16 = ext->b_enter_q16; r.b_exit_q16 = ext->b_exit_q16;
-    r.req_mask = ext->req_mask; r.req_values = ext->req_values;
-    r.weight_q16 = ext->weight_q16; r.qshift = ext->qshift;
-    r.constraint_hash = constraint_hash;
-    r.state_mac = flowy_hash64(&r, offsetof(FlowBusinessRoute64, state_mac), FLOW_GOLDEN_RATIO_64);
+    size_t total_theorems = 0, total_defs = 0, total_covered = 0, total_orphans = 0;
 
-    fprintf(f, "/* Generated by FLOWY lean --compile-route */\n"
-               "#ifndef FLOW_COMPILED_BUSINESS_ROUTE_H\n#define FLOW_COMPILED_BUSINESS_ROUTE_H\n\n"
-               "#include \"flowy_cli.h\"\n\nstatic const FlowBusinessRoute64 g_lean_certified_route = {\n"
-               "    .abi_version = %u,\n    .route_op_mask = %u,\n"
-               "    .b_enter_q16 = %" PRId64 "LL,\n    .b_exit_q16 = %" PRId64 "LL,\n"
-               "    .req_mask = 0x%016" PRIx64 "ULL,\n    .req_values = 0x%016" PRIx64 "ULL,\n"
-               "    .weight_q16 = %d,\n    .qshift = %u,\n"
-               "    .constraint_hash = 0x%016" PRIx64 "ULL,\n    .state_mac = 0x%016" PRIx64 "ULL\n};\n\n"
-               "#endif /* FLOW_COMPILED_BUSINESS_ROUTE_H */\n",
-            r.abi_version, r.route_op_mask, r.b_enter_q16, r.b_exit_q16,
-            r.req_mask, r.req_values, r.weight_q16, r.qshift, r.constraint_hash, r.state_mac);
-    fclose(f);
+    /* 1. Comment/string-aware sorry scan & transitive dependency coverage audit */
+    for (size_t i = 0; i < count; ++i) {
+        LeanSpecExtract ext;
+        uint64_t fhash = 0;
+        if (parse_lean_spec_stream(files[i], &ext, &fhash) != 0) {
+            fprintf(stderr, "Error: cannot open Lean file: %s\n", files[i]);
+            return 1;
+        }
+        if (ext.has_sorry) {
+            fprintf(stderr, "Error: sorry axiom detected in %s! Aborting.\n", files[i]);
+            return 1;
+        }
+        total_theorems += ext.theorem_count;
+        total_defs += ext.def_count;
+        total_covered += ext.covered_defs;
+        total_orphans += ext.orphan_defs;
+    }
+
+    /* 2. Launch lean processes in parallel */
+    pid_t pids[64];
+    for (size_t i = 0; i < count && i < 64; ++i) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            freopen("/dev/null", "w", stdout);
+            freopen("/dev/null", "w", stderr);
+            execlp("lean", "lean", files[i], (char *)NULL);
+            const char *home = getenv("HOME");
+            if (home) {
+                char elan_lean[512];
+                snprintf(elan_lean, sizeof(elan_lean), "%s/.elan/bin/lean", home);
+                execl(elan_lean, "lean", files[i], (char *)NULL);
+            }
+            _exit(127);
+        } else if (pid < 0) {
+            fprintf(stderr, "Error: fork failed for %s\n", files[i]);
+            return 1;
+        }
+        pids[i] = pid;
+    }
+
+    int failures = 0;
+    for (size_t i = 0; i < count && i < 64; ++i) {
+        int status = 0;
+        waitpid(pids[i], &status, 0);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "✗ Lean 4 Kernel rejected: %s (exit code %d)\n", files[i], WEXITSTATUS(status));
+            failures++;
+        } else if (!json_mode) {
+            printf("  ✓ Verified: %s (0 sorryAx)\n", files[i]);
+        }
+    }
+
+    if (failures > 0) {
+        fprintf(stderr, "Error: %d / %zu Lean 4 proofs failed verification.\n", failures, count);
+        return 1;
+    }
+
+    if (json_mode) {
+        flowy_json_start();
+        flowy_json_field_str("subcommand", "lean_batch", true);
+        flowy_json_field_u64("verified_count", count, true);
+        flowy_json_field_u64("theorem_count", total_theorems, true);
+        flowy_json_field_u64("def_count", total_defs, true);
+        flowy_json_field_u64("covered_defs", total_covered, true);
+        flowy_json_field_u64("orphan_defs", total_orphans, true);
+        flowy_json_field_bool("sound", true, false);
+        flowy_json_end();
+    } else {
+        printf("✓ Lean 4 Batch Verification: %zu / %zu files certified sound (%zu theorems, %zu/%zu defs covered, 0 sorryAx)!\n",
+               count, count, total_theorems, total_covered, total_defs);
+    }
     return 0;
 }
 
 int cmd_lean_run(int argc, char **argv, bool json_mode) {
-    const char *from_lean = NULL, *emit_lean = NULL, *mint_abi = NULL, *compile_route = NULL;
-    const char *emit_metal = NULL, *emit_wgsl = NULL;
-    const char *emit_ffi[8] = {0};
-    size_t emit_ffi_cnt = 0;
-    bool verify = false, transition = false;
-    bool verify_all = false;
+    const char *from_lean = NULL;
+    bool verify = false, verify_all = false;
     const char *verify_files[64];
     size_t verify_file_count = 0;
 
@@ -447,22 +315,8 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
         else if (strcmp(argv[i], "--verify-all") == 0) verify_all = true;
         else if ((strcmp(argv[i], "--from-lean") == 0 && i + 1 < argc) || strncmp(argv[i], "--from-lean=", 12) == 0)
             from_lean = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
-        else if ((strcmp(argv[i], "--emit-lean") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-lean=", 12) == 0)
-            emit_lean = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
         else if (strcmp(argv[i], "--verify") == 0) verify = true;
-        else if (strcmp(argv[i], "--transition") == 0) transition = true;
-        else if ((strcmp(argv[i], "--mint-abi") == 0 && i + 1 < argc) || strncmp(argv[i], "--mint-abi=", 11) == 0)
-            mint_abi = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i];
-        else if ((strcmp(argv[i], "--compile-route") == 0 && i + 1 < argc) || strncmp(argv[i], "--compile-route=", 16) == 0)
-            compile_route = (argv[i][15] == '=') ? argv[i] + 16 : argv[++i];
-        else if ((strcmp(argv[i], "--emit-metal") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-metal=", 13) == 0)
-            emit_metal = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
-        else if ((strcmp(argv[i], "--emit-wgsl") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-wgsl=", 12) == 0)
-            emit_wgsl = (argv[i][11] == '=') ? argv[i] + 12 : argv[++i];
-        else if ((strcmp(argv[i], "--emit-ffi") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-ffi=", 11) == 0) {
-            const char *fp = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i];
-            if (emit_ffi_cnt < 8) emit_ffi[emit_ffi_cnt++] = fp;
-        } else if (argv[i][0] != '-') {
+        else if (argv[i][0] != '-') {
             if (verify_file_count < 64) verify_files[verify_file_count++] = argv[i];
             if (!from_lean) from_lean = argv[i];
         }
@@ -472,12 +326,7 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
         return run_batch_lean_verify(verify_files, verify_file_count, json_mode);
     }
 
-    const char *lean_file = from_lean ? from_lean : (emit_lean ? emit_lean : "lean/FlowContract.lean");
-    FILE *probe = (!emit_lean && !from_lean) ? fopen(lean_file, "rb") : NULL;
-    if (probe) fclose(probe);
-    if ((emit_lean || (!from_lean && !probe)) && generate_lean_source(lean_file) != 0) {
-        fprintf(stderr, "Error: failed to generate Lean file: %s\n", lean_file); return 1;
-    }
+    const char *lean_file = from_lean ? from_lean : "lean/FlowContract.lean";
 
     LeanSpecExtract ext;
     uint64_t base_hash = 0;
@@ -502,49 +351,32 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
     uint64_t constraint_hash = (base_hash * 0x100000001b3ULL) ^ 0x51c31a7000000002ULL;
     uint64_t capability_hash = (base_hash * 0x9e3779b97f4a7c15ULL) ^ 0x51c31a7000000003ULL;
 
-    if (mint_abi && mint_flow_abi_header(mint_abi, schema_hash, constraint_hash, capability_hash, &ext) != 0) {
-        fprintf(stderr, "Error: failed to mint ABI header to: %s\n", mint_abi); return 1;
-    }
-    if (compile_route && compile_business_route_header(compile_route, constraint_hash, &ext) != 0) {
-        fprintf(stderr, "Error: failed to compile business route header to: %s\n", compile_route); return 1;
-    }
-    if (emit_metal && flowy_emit_gpu_shader(emit_metal, ext.struct_name, ext.b_enter_q16, ext.b_exit_q16, ext.qshift, false) != 0) return 1;
-    if (emit_wgsl && flowy_emit_gpu_shader(emit_wgsl, ext.struct_name, ext.b_enter_q16, ext.b_exit_q16, ext.qshift, true) != 0) return 1;
-    for (size_t k = 0; k < emit_ffi_cnt; ++k) {
-        if (flowy_emit_ffi_view(emit_ffi[k], ext.struct_name, ext.b_enter_q16, ext.b_exit_q16, ext.qshift) != 0) return 1;
-    }
-
     if (json_mode) {
         flowy_json_start();
         flowy_json_field_str("lean_file", lean_file, true);
         flowy_json_field_str("extracted_structure", ext.struct_name[0] ? ext.struct_name : "none", true);
-        flowy_json_field_u64("extracted_fields", ext.field_count, true); flowy_json_field_u64("theorem_count", ext.theorem_count, true);
+        flowy_json_field_u64("extracted_fields", ext.field_count, true);
+        flowy_json_field_u64("theorem_count", ext.theorem_count, true);
         flowy_json_field_u64("def_count", ext.def_count, true);
         flowy_json_field_u64("covered_defs", ext.covered_defs, true);
         flowy_json_field_u64("orphan_defs", ext.orphan_defs, true);
-        flowy_json_field_bool("kernel_verified", kernel_pass, true); flowy_json_field_u64("sorry_axioms", sorry_axioms, true);
-        if (transition) flowy_json_field_bool("transition_verified", true, true);
-        flowy_json_field_hex64("semantic_schema_hash", schema_hash, true); flowy_json_field_hex64("constraint_hash", constraint_hash, true);
-        flowy_json_field_hex64("capability_hash", capability_hash, true);
-        flowy_json_field_str("minted_abi_header", mint_abi ? mint_abi : "none", true);
-        flowy_json_field_str("compiled_route_header", compile_route ? compile_route : "none", false);
+        flowy_json_field_bool("kernel_verified", kernel_pass, true);
+        flowy_json_field_u64("sorry_axioms", sorry_axioms, true);
+        flowy_json_field_hex64("semantic_schema_hash", schema_hash, true);
+        flowy_json_field_hex64("constraint_hash", constraint_hash, true);
+        flowy_json_field_hex64("capability_hash", capability_hash, false);
         flowy_json_end();
     } else {
-        printf("=== FLOWY HoTT Contract & Integer-Lattice Proof Mint ===\n"
-               "Lean Source File       : %s\nExtracted Structure    : %s (%zu fields -> 64B Univalent)\n"
+        printf("=== FLOWY Lean 4 Formal Proof & Coverage Audit ===\n"
+               "Lean Source File       : %s\nExtracted Structure    : %s (%zu fields)\n"
                "Formal Theorems Count  : %zu (Defs Covered: %zu/%zu, Orphan Defs: %zu)\n"
                "Kernel Verification    : %s\nSorry Axioms Count     : %zu\n"
-               "Minted FlowUnit ABI Hashes:\n  - semantic_schema    : 0x%016" PRIx64 "\n"
+               "Specification ABI Hashes:\n  - semantic_schema    : 0x%016" PRIx64 "\n"
                "  - constraint_hash    : 0x%016" PRIx64 "\n  - capability_hash    : 0x%016" PRIx64 "\n",
-               lean_file, ext.struct_name[0] ? ext.struct_name : "(default)", ext.field_count,
+               lean_file, ext.struct_name[0] ? ext.struct_name : "(none)", ext.field_count,
                ext.theorem_count, ext.covered_defs, ext.def_count, ext.orphan_defs,
                kernel_pass ? "PASS (0 sorryAx)" : "FAILED", sorry_axioms,
                schema_hash, constraint_hash, capability_hash);
-        if (transition) printf("State-Transition Proof : VERIFIED (S_t -> S_{t+1} Conservation)\n");
-        if (mint_abi) printf("ABI header written to  : %s\n", mint_abi);
-        if (compile_route) printf("Compiled route written : %s\n", compile_route);
-        if (emit_metal) printf("Metal buffer written   : %s\n", emit_metal);
-        if (emit_wgsl) printf("WGSL buffer written    : %s\n", emit_wgsl);
     }
     return kernel_pass ? 0 : 1;
 }

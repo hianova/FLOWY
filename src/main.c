@@ -4,19 +4,18 @@
 #include <string.h>
 
 static void print_top_help(void) {
-    printf("FLOWY — Post-flow Resident Symbolic, Geometric & Diagnostic Companion CLI\n\n"
+    printf("FLOWY — Gate 0 Cross-Layer Formal, Geometric & Hardware Auditor CLI\n\n"
            "USAGE:\n"
            "    flowy [GLOBAL_OPTIONS] <SUBCOMMAND> [SUBCOMMAND_OPTIONS]\n\n"
            "SUBCOMMANDS:\n"
-           "    slice     Structural projection & 64-byte cache-line univalence auditor\n"
-           "    qpoly     Geometric spec compiler & dual-threshold hysteresis governor synthesizer\n"
-           "    diff      Dual-domain M_Ideal <-> B_64 algebraic wind tunnel & CEGIS oracle\n"
-           "    lean      HoTT contract & integer-lattice proof mint (zero sorryAx)\n"
-           "    sieve     64-bit boundary tag, 10-bit sieve, QSBR & Hex128 capsule pullback decoder\n"
-           "    init      One-command Lean 4 + C11 64B Univalent project scaffolder\n\n"
+           "    slice     64-byte cache-line univalence, LLVM IR (0-float/0-heap), MCA & Metal AIR auditor\n"
+           "    lean      Lean 4 formal proof verifier & transitive definition coverage auditor (0 sorryAx)\n"
+           "    qpoly     Conservative inner polytope quantizer & hysteresis deadband calculator\n"
+           "    diff      Dual-domain M_Ideal <-> B_64 algebraic wind tunnel, zero-fault bench & 64B corpus replay\n"
+           "    sieve     64-bit boundary tag, 10-bit sieve, Wave64, QSBR & Hex128 capsule pullback decoder\n\n"
            "GLOBAL OPTIONS:\n"
-           "    --json    Deterministic JSON output for Agent consumption\n"
-           "    -h, --help Print help information\n"
+           "    --json        Deterministic JSON output for Agent / CI Gate 0 consumption\n"
+           "    -h, --help    Print help information\n"
            "    -v, --version Print version\n");
 }
 
@@ -48,8 +47,6 @@ int main(int argc, char **argv) {
         return cmd_lean_run(sub_argc, sub_argv, json_mode);
     } else if (strcmp(subcmd, "sieve") == 0) {
         return cmd_sieve_run(sub_argc, sub_argv, json_mode);
-    } else if (strcmp(subcmd, "init") == 0) {
-        return cmd_init_run(sub_argc, sub_argv, json_mode);
     } else {
         fprintf(stderr, "Error: unrecognized subcommand '%s'. See --help.\n", subcmd);
         return 1;

@@ -49,7 +49,7 @@ check-loc:
 
 test: $(TARGET)
 	@mkdir -p build lean tests
-	@echo "=== Running FLOWY Test Suite ==="
+	@echo "=== Running FLOWY Gate 0 & Wind-Tunnel Test Suite ==="
 	# 1. Top-level help, version and subcommand help routing
 	$(TARGET) --help > /dev/null
 	$(TARGET) slice --help > /dev/null
@@ -57,23 +57,13 @@ test: $(TARGET)
 	$(TARGET) diff --help > /dev/null
 	$(TARGET) lean --help > /dev/null
 	$(TARGET) sieve --help > /dev/null
-	$(TARGET) init --help > /dev/null
 	$(TARGET) --version
-	# 2. Subcommand: slice (64B Univalence Audit, --audit-all, LLVM AST/IR/MCA & Git routing, Shadow, Excavate, GPU/FFI buffers)
-	$(TARGET) slice src/flowy_cli.h --audit-struct FlowBusinessRoute64 --json > build/slice_route64.json
-	$(TARGET) slice src/flowy_cli.h --audit-all --emit-metal build/slice_route64.metal --emit-wgsl build/slice_route64.wgsl --emit-ffi build/slice_route64.py --json > build/slice_all.json
-	$(CC) -x c++ -std=c++14 -fsyntax-only build/slice_route64.metal
-	python3 build/slice_route64.py
+	# 2. Subcommand: slice (64B Univalence Audit, --audit-all, LLVM AST/IR/MCA & Git routing)
+	$(TARGET) slice src/flowy_cli.h --audit-struct FlowCorpusRecord64 --json > build/slice_corpus64.json
+	$(TARGET) slice src/flowy_cli.h --audit-all --json > build/slice_all.json
 	$(TARGET) slice src/flowy_cli.c --llvm-ast --llvm-ir --mca --git-diff --json > build/slice_test.json
-	$(TARGET) slice src/flowy_cli.c --shadow build/tmp_shadow.c
-	$(CC) -std=c11 $(INCLUDES) -c build/tmp_shadow.c -o build/tmp_shadow.o
-	$(TARGET) slice src/flowy_cli.c --excavate build/tmp_excavated.c
-	$(CC) -std=c11 $(INCLUDES) -c build/tmp_excavated.c -o build/tmp_excavated.o
-	$(TARGET) slice build/tmp_excavated.c --restore build/tmp_excavated.c
-	# 3. Subcommand: qpoly (Inner-quantization, --auto-cegis & Governor synthesis + Metal/WGSL/FFI emission)
-	$(TARGET) qpoly --dim 1 --threshold 65536 --deadband 4096 --noise-floor 2048 --qshift-sweep --auto-cegis --emit-c build/tmp_governor.h --emit-metal build/tmp_governor.metal --emit-wgsl build/tmp_governor.wgsl --emit-ffi build/tmp_governor.py --json > build/qpoly_test.json
-	$(CC) -x c++ -std=c++14 -fsyntax-only build/tmp_governor.metal
-	python3 build/tmp_governor.py
+	# 3. Subcommand: qpoly (Conservative inner polytope quantization, --qshift-sweep & --auto-cegis)
+	$(TARGET) qpoly --dim 1 --threshold 65536 --deadband 4096 --noise-floor 2048 --qshift-sweep --auto-cegis --json > build/qpoly_test.json
 	# 4. Subcommand: diff (5-mode algebraic wind tunnel + --auto-cegis + --bench + 64B binary corpus recording & replay)
 	$(TARGET) diff --mode arith --trials 10000 --auto-cegis --bench --json > build/diff_arith.json
 	$(TARGET) diff --mode tunnel --trials 10000 --auto-cegis --json > build/diff_tunnel.json
@@ -82,12 +72,9 @@ test: $(TARGET)
 	$(TARGET) diff --mode relativistic --trials 10000 --auto-cegis --json > build/diff_relativistic.json
 	$(TARGET) diff --mode arith --trials 256 --emit-corpus build/corpus_arith.bin --json > build/diff_corpus_emit.json
 	$(TARGET) diff --corpus build/corpus_arith.bin --json > build/diff_corpus_replay.json
-	# 5. Subcommand: lean (Formal proof generation, --transition, ABI mint, 64B struct synthesis, Route, GPU & FFI compilation)
-	$(TARGET) lean --emit-lean lean/FlowContract.lean --transition --mint-abi build/flow_direct_unit_abi.h --compile-route build/flow_compiled_route.h --emit-metal build/flow_state.metal --emit-wgsl build/flow_state.wgsl --emit-ffi build/flow_state.py --emit-ffi build/flow_state.ts --emit-ffi build/flow_state.swift --json > build/lean_test.json
-	$(CC) -x c++ -std=c++14 -fsyntax-only build/flow_state.metal
-	python3 build/flow_state.py
-	node --input-type=module -e 'import { FlowCanonicalStateView, FLOW_QSHIFT } from "./build/flow_state.ts"; const b = new ArrayBuffer(64); const v = new FlowCanonicalStateView(b); v.setSlotU64(0, 99n); if (v.getSlotU64(0) !== 99n || FlowCanonicalStateView.BYTE_LENGTH !== 64 || FLOW_QSHIFT !== 16) process.exit(1);'
-	swiftc build/flow_state.swift -e 'let s = FlowCanonicalState(slot0: 42); assert(s.slot0 == 42 && flowVerifyFlowCanonicalStateUnivalent64())' -o build/test_swift_ffi && ./build/test_swift_ffi
+	# 5. Subcommand: lean (Formal proof kernel verification, transitive def coverage & parallel batch verifier)
+	$(TARGET) lean --from-lean lean/FlowContract.lean --verify --json > build/lean_test.json
+	$(TARGET) lean --verify-all lean/FlowContract.lean
 	# 6. Subcommand: sieve (Boundary tag, Sieve pullback, Kan Homotopy, HIT Quotient, Wave64, Hex128 Capsule & --verify-trace)
 	$(TARGET) sieve --decode-tag 0x7FF8400010040000 --json > build/sieve_tag.json
 	$(TARGET) sieve --decode-sieve 0x3FF --json > build/sieve_mask.json
@@ -98,16 +85,11 @@ test: $(TARGET)
 	$(TARGET) sieve --capsule-encode "FLOW_UNIVALENT_CAPSULE_PAYLOAD" --json > build/capsule_enc.json
 	$(TARGET) sieve --capsule-decode 464c4f575f554e4956414c454e545f43415053554c455f5041594c4f4144000000000000000000000000000000000000000000000000000079c33513c3dc78b6 --json > build/capsule_dec.json
 	$(TARGET) sieve --verify-trace 0x3FF,0x3FE,0x3FC,0x3FF --json > build/sieve_trace.json
-	# 7. Subcommand: init (One-command Lean 4 + C11 64B Univalent + FLOW ASM project scaffolding)
-	$(TARGET) init build/tmp_scaffold_proj --json > build/init_test.json
-	$(MAKE) -C build/tmp_scaffold_proj test
-	$(MAKE) -C build/tmp_scaffold_proj verify-lean
-	# 8. End-to-end integration test runner
+	# 7. End-to-end integration test runner
 	$(CC) $(CFLAGS) $(INCLUDES) tests/test_e2e.c src/flowy_cli.c -o build/test_e2e $(LDFLAGS)
 	./build/test_e2e
 	@echo "=== All Tests Passed Successfully! ==="
 
 verify-lean: $(TARGET)
-	@mkdir -p lean
-	$(TARGET) lean --emit-lean lean/FlowContract.lean --transition --verify --json
+	$(TARGET) lean --verify-all lean/FlowContract.lean
 	@echo "=== Lean 4 Verification Verified (0 sorryAx)! ==="
