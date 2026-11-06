@@ -13,7 +13,7 @@ static void print_top_help(void) {
            "    qpoly     Conservative inner polytope quantizer & hysteresis deadband calculator\n"
            "    diff      Dual-domain M_Ideal <-> B_64 algebraic wind tunnel, zero-fault bench & 64B corpus replay\n"
            "    sieve     Fused 4-mode (ASM+Jet2+HoTT/QPoly+QSBR) sieve, Wave64, QSBR & Hex128 pullback decoder\n"
-           "    map       Cross-ecosystem target corpus mapper & differential auditor (Linux flux / Chromium Core)\n\n"
+           "    map       Pure syntax & struct-geometry target corpus mapper & differential auditor\n\n"
            "GLOBAL OPTIONS:\n"
            "    --json        Deterministic JSON output for Agent / CI Gate 0 consumption\n"
            "    -h, --help    Print help information\n"

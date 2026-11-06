@@ -33,210 +33,419 @@ FLOW_STATIC_ASSERT_UNIVALENT(FlowCorpusRecord64, FlowWavAssetDesc64);
 FLOW_STATIC_ASSERT_UNIVALENT(FlowCorpusRecord64, FlowGlbMeshDesc64);
 #endif
 
+#include <ctype.h>
+#include <dirent.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <inttypes.h>
-#include <time.h>
-#include <sys/stat.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
+#include <time.h>
 
 FLOW_QPOLY_DEFINE_EX(MapTargetPoly1D, 1, 16, 4)
 
-typedef enum {
-    TARGET_CORPUS_GENERIC  = 0,
-    TARGET_CORPUS_LINUX    = 1,
-    TARGET_CORPUS_CHROMIUM = 2,
-    TARGET_CORPUS_DUAL     = 3
-} TargetCorpusKind;
-
 typedef struct {
-    const char *subsystem;
-    const char *rel_probe_path;
-    const char *ecosystem_basis;
-    const char *mapped_primitives;
-    uint32_t    tier; /* 1 = 100% Isomorphic, 2 = Fastpath+ABI Covered, 3 = Host Provider */
-    bool        present;
-} SubsystemMappingEntry;
+    char     target_path[512];
+    uint64_t files_scanned;
+    uint64_t bytes_scanned;
+    uint64_t max_files_limit;
 
-typedef struct {
-    char             target_path[512];
-    char             corpus_kind_str[32];
-    char             corpus_version[64];
-    TargetCorpusKind kind;
-    uint32_t         subsystems_probed;
-    uint32_t         subsystems_present;
-    uint32_t         tier1_isomorphic_count;
-    uint32_t         tier2_fastpath_abi_count;
-    uint32_t         tier3_host_provider_count;
-    uint32_t         coverage_permille; /* e.g., 727 = 72.7% */
+    /* 1. Structural Geometry Signatures (maps to unit 16B UnitCell128 & bloom 64B ABI) */
+    uint64_t structs_parsed;
+    uint64_t structs_16b_multiple;
+    uint64_t structs_64b_multiple;
+    uint64_t structs_zero_padding;
+    uint64_t structs_with_padding_holes;
+    uint64_t total_padding_hole_bytes;
 
-    /* Real scanned hotspot counts from target source files */
-    uint64_t         uapi_ring_structs_matched;
-    uint64_t         nospec_bounds_hotspots;
-    uint64_t         overflow_check_hotspots;
-    uint64_t         refcount_rcu_hotspots;
-    uint64_t         filter_sandbox_hotspots;
-    uint32_t         abi_gaps_detected;
+    /* 2. Arithmetic, Fixed-Point & Cyclic Mask Signatures (maps to FLOW ASM Sieve & Q48.16) */
+    uint64_t sig_overflow_checks;
+    uint64_t sig_saturating_clamps;
+    uint64_t sig_fixed_point_shifts;
+    uint64_t sig_cyclic_ring_masks;
+    uint64_t sig_arith_mask_total;
 
-    /* Differential wind-tunnel benchmark telemetry */
-    bool             bench_ran;
-    uint64_t         trials;
-    uint64_t         baseline_cycles;
-    uint64_t         flow_ecosystem_cycles;
-    uint64_t         oob_or_overflow_escapes;
-    bool             zero_page_faults;
-} TargetMapReport;
+    /* 3. Lock-Free Epoch & 2-Jet / Hysteresis Control Signatures (maps to FLOW QSBR & 2-Jet/QPoly) */
+    uint64_t sig_atomic_epoch_sync;
+    uint64_t sig_heap_lifecycle_churn;
+    uint64_t sig_dynamics_hysteresis;
+    uint64_t sig_epoch_control_total;
+
+    /* 4. Command Dispatch & Policy Filter Signatures (maps to FlowLeanAbiDesc64 & bloom 64B Cmd) */
+    uint64_t sig_branchy_switch_dispatch;
+    uint64_t sig_opcode_command_streams;
+    uint64_t sig_policy_filter_hooks;
+    uint64_t sig_dispatch_filter_total;
+
+    /* Cross-Ecosystem ABI Completeness & Differential Wind-Tunnel Telemetry */
+    uint32_t abi_gaps_detected;
+    bool     bench_ran;
+    uint64_t trials;
+    uint64_t baseline_cycles;
+    uint64_t flow_ecosystem_cycles;
+    uint64_t oob_or_overflow_escapes;
+    bool     zero_page_faults;
+} StructuralMapReport;
 
 static void print_map_help(void) {
-    printf("FLOWY map — Cross-Ecosystem Target Corpus Mapper (Linux flux / Chromium Core)\n\n"
+    printf("FLOWY map — Pure Syntax & Struct-Geometry Corpus Mapper (0 App-Specific Strings)\n\n"
            "USAGE:\n"
            "    flowy map [OPTIONS] <target_dir>\n"
            "    (aliases: flowy target, flowy corpus)\n\n"
            "OPTIONS:\n"
-           "    --bench                  Run hardware-cycle differential wind-tunnel vs target patterns\n"
+           "    --max-files <N>          Maximum source/header files to scan (default: 4096)\n"
+           "    --bench                  Run hardware-cycle differential wind-tunnel\n"
            "    --trials <N>             Number of differential wind-tunnel trials (default: 10000)\n"
-           "    --emit-corpus <file.bin> Emit 64B FlowCorpusRecord64 trajectory snapshot of target\n"
-           "    --check-gaps             Enforce strict 0-gap ABI completeness gate\n"
+           "    --emit-corpus <file.bin> Emit 64B FlowCorpusRecord64 trajectory snapshot\n"
+           "    --check-gaps             Enforce strict 0-gap ecosystem ABI completeness gate\n"
            "    --json                   Deterministic JSON output for CI / Gate 0 consumption\n"
            "    -h, --help               Print help information\n");
 }
 
-static bool path_exists(const char *base, const char *rel) {
-    char full[1024];
-    if (!rel || !rel[0]) {
-        snprintf(full, sizeof(full), "%s", base);
-    } else {
-        snprintf(full, sizeof(full), "%s/%s", base, rel);
-    }
-    struct stat st;
-    return stat(full, &st) == 0;
-}
-
-static uint64_t count_substr_in_file(const char *base, const char *rel, const char *needle) {
-    char full[1024];
-    snprintf(full, sizeof(full), "%s/%s", base, rel);
-    FILE *f = fopen(full, "rb");
-    if (!f) return 0;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
-    long sz = ftell(f);
-    if (sz <= 0 || sz > (16L * 1024L * 1024L)) { fclose(f); return 0; }
-    rewind(f);
-    char *buf = (char *)malloc((size_t)sz + 1U);
-    if (!buf) { fclose(f); return 0; }
-    size_t rd = fread(buf, 1, (size_t)sz, f);
-    buf[rd] = '\0';
-    fclose(f);
-
-    uint64_t cnt = 0;
-    size_t nlen = strlen(needle);
-    if (nlen > 0) {
-        const char *p = buf;
-        while ((p = strstr(p, needle)) != NULL) {
-            cnt++;
-            p += nlen;
+static void strip_comments_and_strings(char *src) {
+    bool in_block = false, in_line = false, in_str = false;
+    for (size_t i = 0; src[i] != '\0'; ++i) {
+        if (in_block) {
+            if (src[i] == '*' && src[i + 1] == '/') {
+                src[i] = ' ';
+                src[i + 1] = ' ';
+                i++;
+                in_block = false;
+            } else if (src[i] != '\n') {
+                src[i] = ' ';
+            }
+        } else if (in_line) {
+            if (src[i] == '\n') in_line = false;
+            else src[i] = ' ';
+        } else if (in_str) {
+            if (src[i] == '\\' && src[i + 1] != '\0') {
+                src[i] = ' ';
+                src[i + 1] = ' ';
+                i++;
+            } else if (src[i] == '"') {
+                in_str = false;
+            } else if (src[i] != '\n') {
+                src[i] = ' ';
+            }
+        } else {
+            if (src[i] == '"') {
+                in_str = true;
+            } else if (src[i] == '/' && src[i + 1] == '*') {
+                src[i] = ' ';
+                src[i + 1] = ' ';
+                i++;
+                in_block = true;
+            } else if (src[i] == '/' && src[i + 1] == '/') {
+                src[i] = ' ';
+                src[i + 1] = ' ';
+                i++;
+                in_line = true;
+            }
         }
     }
-    free(buf);
+}
+
+static size_t infer_field_type_size(const char *decl, size_t *out_align) {
+    size_t sz = 8U, al = 8U;
+    if (strchr(decl, '*')) {
+        sz = 8U;
+        al = 8U;
+    } else if (strstr(decl, "128")) {
+        sz = 16U;
+        al = 16U;
+    } else if (strstr(decl, "uint64_t") || strstr(decl, "int64_t") || strstr(decl, "__u64") ||
+               strstr(decl, "__s64") || strstr(decl, "u64 ") || strstr(decl, "s64 ") ||
+               strstr(decl, "ulong") || strstr(decl, "unsigned long") || strstr(decl, "long long") ||
+               strstr(decl, "size_t") || strstr(decl, "uintptr_t") || strstr(decl, "double")) {
+        sz = 8U;
+        al = 8U;
+    } else if (strstr(decl, "uint32_t") || strstr(decl, "int32_t") || strstr(decl, "__u32") ||
+               strstr(decl, "__s32") || strstr(decl, "u32 ") || strstr(decl, "s32 ") ||
+               strstr(decl, "atomic_t") || strstr(decl, "refcount_t") || strstr(decl, "float") ||
+               strstr(decl, "unsigned int") || strstr(decl, "int ") || strncmp(decl, "int\t", 4) == 0) {
+        sz = 4U;
+        al = 4U;
+    } else if (strstr(decl, "uint16_t") || strstr(decl, "int16_t") || strstr(decl, "__u16") ||
+               strstr(decl, "__s16") || strstr(decl, "u16 ") || strstr(decl, "s16 ") ||
+               strstr(decl, "short")) {
+        sz = 2U;
+        al = 2U;
+    } else if (strstr(decl, "uint8_t") || strstr(decl, "int8_t") || strstr(decl, "__u8") ||
+               strstr(decl, "__s8") || strstr(decl, "u8 ") || strstr(decl, "s8 ") ||
+               strstr(decl, "char") || strstr(decl, "bool")) {
+        sz = 1U;
+        al = 1U;
+    }
+    if (out_align) *out_align = al;
+    return sz;
+}
+
+static void parse_struct_geometries_in_buffer(const char *buf, StructuralMapReport *rep) {
+    const char *p = buf;
+    while ((p = strstr(p, "struct")) != NULL) {
+        if ((p > buf && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) ||
+            (isalnum((unsigned char)p[6]) || p[6] == '_')) {
+            p += 6;
+            continue;
+        }
+        const char *brace_open = strchr(p, '{');
+        const char *semi_before = strchr(p, ';');
+        if (!brace_open || (semi_before && semi_before < brace_open)) {
+            p += 6;
+            continue;
+        }
+        if ((size_t)(brace_open - p) > 256U) {
+            p += 6;
+            continue;
+        }
+
+        char hdr[256] = {0};
+        size_t hlen = (size_t)(brace_open - p);
+        memcpy(hdr, p, hlen < sizeof(hdr) - 1U ? hlen : sizeof(hdr) - 1U);
+        size_t forced_align = 1U;
+        if (strstr(hdr, "aligned(64") || strstr(hdr, "_Alignas(64")) forced_align = 64U;
+        else if (strstr(hdr, "aligned(16") || strstr(hdr, "_Alignas(16")) forced_align = 16U;
+
+        int depth = 1;
+        const char *q = brace_open + 1;
+        while (*q && depth > 0) {
+            if (*q == '{') depth++;
+            else if (*q == '}') depth--;
+            q++;
+        }
+        if (depth != 0) break;
+        const char *brace_close = q - 1;
+
+        size_t cur_offset = 0U, max_align = forced_align, padding = 0U, bit_rem = 0U, field_cnt = 0U;
+        const char *fstart = brace_open + 1;
+        while (fstart < brace_close) {
+            const char *semi = memchr(fstart, ';', (size_t)(brace_close - fstart));
+            if (!semi) break;
+            size_t slen = (size_t)(semi - fstart);
+            if (slen > 0U && slen < 160U && !memchr(fstart, '(', slen)) {
+                char stmt[160] = {0};
+                memcpy(stmt, fstart, slen);
+                bool has_alpha = false;
+                for (size_t k = 0; k < slen; ++k) {
+                    if (isalpha((unsigned char)stmt[k])) { has_alpha = true; break; }
+                }
+                if (has_alpha) {
+                    size_t f_al = 8U;
+                    size_t base_sz = infer_field_type_size(stmt, &f_al);
+                    if (f_al > max_align) max_align = f_al;
+                    const char *colon = strchr(stmt, ':');
+                    if (colon && colon[1] != ':') {
+                        size_t bits = (size_t)strtoull(colon + 1, NULL, 10);
+                        if (bits > 0U && bits <= base_sz * 8U) {
+                            if (bit_rem >= bits) {
+                                bit_rem -= bits;
+                            } else {
+                                size_t rem = cur_offset % f_al;
+                                if (rem != 0U) {
+                                    size_t pad = f_al - rem;
+                                    cur_offset += pad;
+                                    padding += pad;
+                                }
+                                cur_offset += base_sz;
+                                bit_rem = (base_sz * 8U) - bits;
+                            }
+                            field_cnt++;
+                        }
+                    } else {
+                        bit_rem = 0U;
+                        size_t mult = 1U;
+                        const char *obr = strchr(stmt, '[');
+                        if (obr) {
+                            size_t arr_n = (size_t)strtoull(obr + 1, NULL, 0);
+                            if (arr_n > 0U && arr_n <= 4096U) mult = arr_n;
+                        }
+                        size_t rem = cur_offset % f_al;
+                        if (rem != 0U) {
+                            size_t pad = f_al - rem;
+                            cur_offset += pad;
+                            padding += pad;
+                        }
+                        cur_offset += base_sz * mult;
+                        field_cnt++;
+                    }
+                }
+            }
+            fstart = semi + 1;
+        }
+
+        if (field_cnt > 0U && cur_offset > 0U) {
+            size_t tail_rem = cur_offset % max_align;
+            if (tail_rem != 0U) {
+                size_t tail_pad = max_align - tail_rem;
+                cur_offset += tail_pad;
+                padding += tail_pad;
+            }
+            rep->structs_parsed++;
+            if ((cur_offset % 16U) == 0U) rep->structs_16b_multiple++;
+            if ((cur_offset % 64U) == 0U) rep->structs_64b_multiple++;
+            if (padding == 0U) {
+                rep->structs_zero_padding++;
+            } else {
+                rep->structs_with_padding_holes++;
+                rep->total_padding_hole_bytes += padding;
+            }
+        }
+        p = brace_close + 1;
+    }
+}
+
+static uint64_t count_token(const char *buf, const char *needle) {
+    uint64_t cnt = 0;
+    size_t nlen = strlen(needle);
+    if (nlen == 0U) return 0;
+    const char *p = buf;
+    while ((p = strstr(p, needle)) != NULL) {
+        cnt++;
+        p += nlen;
+    }
     return cnt;
 }
 
-static void detect_linux_version(const char *base, char *out_ver, size_t cap) {
-    char full[1024];
-    snprintf(full, sizeof(full), "%s/Makefile", base);
-    FILE *f = fopen(full, "rb");
-    if (!f) {
-        snprintf(out_ver, cap, "unknown");
+static void scan_source_file(const char *filepath, StructuralMapReport *rep) {
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
+    long fsz = ftell(f);
+    if (fsz <= 0 || fsz > (4L * 1024L * 1024L)) { fclose(f); return; }
+    rewind(f);
+
+    char *buf = (char *)malloc((size_t)fsz + 1U);
+    if (!buf) { fclose(f); return; }
+    size_t rd = fread(buf, 1, (size_t)fsz, f);
+    buf[rd] = '\0';
+    fclose(f);
+
+    rep->files_scanned++;
+    rep->bytes_scanned += (uint64_t)rd;
+
+    strip_comments_and_strings(buf);
+
+    /* 1. Extract struct geometry & padding holes */
+    parse_struct_geometries_in_buffer(buf, rep);
+
+    /* 2. Extract arithmetic, fixed-point & cyclic mask signatures */
+    rep->sig_overflow_checks +=
+        count_token(buf, "_overflow(") +
+        count_token(buf, "CheckedAdd") +
+        count_token(buf, "CheckedSub") +
+        count_token(buf, "CheckedMul") +
+        count_token(buf, "REPORT_OVERFLOW");
+
+    rep->sig_saturating_clamps +=
+        count_token(buf, "clamp(") +
+        count_token(buf, "Clamp") +
+        count_token(buf, "saturat") +
+        count_token(buf, "Saturat") +
+        count_token(buf, "ClampedAdd") +
+        count_token(buf, "ClampedSub");
+
+    rep->sig_fixed_point_shifts +=
+        count_token(buf, "<< 16") +
+        count_token(buf, ">> 16") +
+        count_token(buf, "FractionalBits") +
+        count_token(buf, "65536");
+
+    rep->sig_cyclic_ring_masks +=
+        count_token(buf, "& mask") +
+        count_token(buf, "& (mask)") +
+        count_token(buf, "->mask") +
+        count_token(buf, "cap_mask") +
+        count_token(buf, "nospec");
+
+    /* 3. Extract lock-free epoch & 2-Jet / hysteresis control signatures */
+    rep->sig_atomic_epoch_sync +=
+        count_token(buf, "memory_order_") +
+        count_token(buf, "atomic_") +
+        count_token(buf, "rcu_") +
+        count_token(buf, "refcount_") +
+        count_token(buf, "qsbr");
+
+    rep->sig_heap_lifecycle_churn +=
+        count_token(buf, "malloc(") +
+        count_token(buf, "calloc(") +
+        count_token(buf, "kfree(") +
+        count_token(buf, "free(");
+
+    rep->sig_dynamics_hysteresis +=
+        count_token(buf, "hysteresis") +
+        count_token(buf, "deadband") +
+        count_token(buf, "velocity") +
+        count_token(buf, "damping") +
+        count_token(buf, "elastic") +
+        count_token(buf, "threshold");
+
+    /* 4. Extract command dispatch & policy filter signatures */
+    rep->sig_branchy_switch_dispatch +=
+        count_token(buf, "switch (") +
+        count_token(buf, "switch(");
+
+    rep->sig_opcode_command_streams +=
+        count_token(buf, "opcode") +
+        count_token(buf, "CommandHeader") +
+        count_token(buf, "cmd_");
+
+    rep->sig_policy_filter_hooks +=
+        count_token(buf, "filter") +
+        count_token(buf, "policy") +
+        count_token(buf, "verifier") +
+        count_token(buf, "seccomp");
+
+    free(buf);
+}
+
+static bool has_source_extension(const char *name) {
+    const char *dot = strrchr(name, '.');
+    if (!dot) return false;
+    return strcmp(dot, ".h") == 0 || strcmp(dot, ".hpp") == 0 ||
+           strcmp(dot, ".c") == 0 || strcmp(dot, ".cc") == 0 ||
+           strcmp(dot, ".cpp") == 0 || strcmp(dot, ".m") == 0 ||
+           strcmp(dot, ".mm") == 0 || strcmp(dot, ".metal") == 0;
+}
+
+static void walk_directory_recursive(const char *dir_path, StructuralMapReport *rep, int depth) {
+    if (depth > 16 || rep->files_scanned >= rep->max_files_limit) return;
+
+    struct stat st;
+    if (stat(dir_path, &st) != 0) return;
+    if (S_ISREG(st.st_mode)) {
+        if (has_source_extension(dir_path)) {
+            scan_source_file(dir_path, rep);
+        }
         return;
     }
-    char line[256];
-    int ver = -1, patch = -1, sub = -1;
-    char extra[32] = {0};
-    for (int i = 0; i < 16 && fgets(line, sizeof(line), f); ++i) {
-        if (strncmp(line, "VERSION =", 9) == 0) ver = atoi(line + 9);
-        else if (strncmp(line, "PATCHLEVEL =", 12) == 0) patch = atoi(line + 12);
-        else if (strncmp(line, "SUBLEVEL =", 10) == 0) sub = atoi(line + 10);
-        else if (strncmp(line, "EXTRAVERSION =", 14) == 0) {
-            const char *p = line + 14;
-            while (*p == ' ' || *p == '\t') p++;
-            size_t k = 0;
-            while (*p && *p != '\n' && *p != '\r' && k + 1 < sizeof(extra)) {
-                extra[k++] = *p++;
-            }
-            extra[k] = '\0';
+    if (!S_ISDIR(st.st_mode)) return;
+
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (rep->files_scanned >= rep->max_files_limit) break;
+        const char *name = ent->d_name;
+        if (name[0] == '.') continue;
+        if (strcmp(name, "build") == 0 || strcmp(name, "node_modules") == 0 ||
+            strcmp(name, "Documentation") == 0) {
+            continue;
+        }
+        char child[1024];
+        snprintf(child, sizeof(child), "%s/%s", dir_path, name);
+        if (stat(child, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            walk_directory_recursive(child, rep, depth + 1);
+        } else if (S_ISREG(st.st_mode) && has_source_extension(name)) {
+            scan_source_file(child, rep);
         }
     }
-    fclose(f);
-    if (ver >= 0 && patch >= 0) {
-        snprintf(out_ver, cap, "%d.%d.%d%s", ver, patch, sub >= 0 ? sub : 0, extra);
-    } else {
-        snprintf(out_ver, cap, "generic");
-    }
+    closedir(dir);
 }
 
-static void detect_chromium_version(const char *base, char *out_ver, size_t cap) {
-    char full[1024];
-    snprintf(full, sizeof(full), "%s/chrome/VERSION", base);
-    FILE *f = fopen(full, "rb");
-    if (!f) {
-        snprintf(out_ver, cap, "head");
-        return;
-    }
-    char line[128];
-    int major = -1, minor = 0, build = 0, patch = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "MAJOR=", 6) == 0) major = atoi(line + 6);
-        else if (strncmp(line, "MINOR=", 6) == 0) minor = atoi(line + 6);
-        else if (strncmp(line, "BUILD=", 6) == 0) build = atoi(line + 6);
-        else if (strncmp(line, "PATCH=", 6) == 0) patch = atoi(line + 6);
-    }
-    fclose(f);
-    if (major >= 0) {
-        snprintf(out_ver, cap, "%d.%d.%d.%d", major, minor, build, patch);
-    } else {
-        snprintf(out_ver, cap, "head");
-    }
-}
-
-static SubsystemMappingEntry k_linux_subsystems[] = {
-    {"io_uring",   "io_uring/io_uring.c",        "unit + FLOW",  "UnitCell128(16B<->CQE/SQE) + FlowUmaBuffer + flow_asm_ring_load_u64", 1, false},
-    {"ipc",        "ipc",                        "FLOW",         "FLOW_SPSC_DEFINE(64B Ring) + FlowUmaBuffer(0-Fault Shared Arena)",    1, false},
-    {"lib",        "include/linux/nospec.h",     "FLOW + unit",  "flow_asm_sieve_eval_64 + flow_asm_isqrt_u128 + unit_utf8_dfa_step",   1, false},
-    {"rcu_lock",   "kernel/rcu",                 "FLOW",         "FlowQsbrEpoch(publish_ptr / load_ptr / quiescent_check)",             1, false},
-    {"sched_time", "kernel/sched",               "FLOW",         "FlowJet2(Taylor Breach) + FLOW_QPOLY_DEFINE_EX + FlowCycleBudget",    1, false},
-    {"bpf_rust",   "io_uring/bpf_filter.c",      "flowy + FLOW", "FlowLeanAbiDesc64(0-sorryAx) + 4-Mode Fused Sieve(0x3FFF)",           1, false},
-    {"security",   "security",                   "FLOW + flowy", "RicardianStateV4 + SHA-256 Contract Seal + Ternary Control Gate",     1, false},
-    {"crypto",     "crypto",                     "FLOW + flowy", "FIPS 180-4 SHA-256 + 64-Bit FNV-1a / Golden-Ratio MAC",               1, false},
-    {"certs",      "certs",                      "flowy",        "FlowLeanSpecMeta64 + Cryptographic ABI MAC Verification",             1, false},
-    {"tools",      "tools",                      "flowy",        "flowy slice / lean / qpoly / diff / sieve / map",                     1, false},
-    {"net",        "net",                        "unit + FLOW",  "UnitPacketView(16B) + UnitFlowEngine(0-Switch LUT) + 2-Jet Guard",    2, false},
-    {"block",      "block",                      "unit + FLOW",  "UnitStorageSliceView(16B LBA) + Schmitt QPoly I/O Cost Governor",     2, false},
-    {"mm",         "mm",                         "FLOW",         "FlowUmaBuffer(Pre-faulted Page Lock) + FlowZeroFaultGuard(ru_minflt)",2, false},
-    {"gpu_drm",    "drivers/gpu",                "bloom",        "FlowGpuCmdDesc64 + FlowGpuCsgOp64 + FlowHostWindowDesc64",            2, false},
-    {"sound_hid",  "sound",                      "bloom",        "FlowAudioSynthDesc64 + FlowImeComposition64 + FlowSvgUiNode64",       2, false},
-    {"arch",       "arch",                       "FLOW + unit",  "ARM64/x86_64 Inline ASM Sieve + UnitCpuInstView + UnitCurrentDrive",  2, false},
-    {"drivers_hw", "drivers",                    "host",         "Host PCIe/USB/ACPI Physical Bus Enumeration",                         3, false},
-    {"fs_legacy",  "fs",                         "host",         "Host VFS / POSIX Disk Filesystem Tree",                               3, false},
-    {"init_boot",  "init",                       "host",         "Host Early Boot & Initramfs",                                         3, false},
-    {"virt_kvm",   "virt",                       "host",         "Host Hypervisor VMCS/Stage-2 Page Tables",                            3, false},
-    {"usr_doc",    "Documentation",              "host",         "Host Documentation & Initramfs CPIO",                                 3, false},
-    {"scripts",    "scripts",                    "host",         "Host Kbuild & Kernel Build Scripts",                                  3, false}
-};
-
-static SubsystemMappingEntry k_chromium_subsystems[] = {
-    {"mojo_ipc",       "mojo",                   "unit + FLOW",  "UnitCell128(16B Wire/IPC) + FLOW_SPSC_DEFINE + FlowUmaBuffer",        1, false},
-    {"base_numerics",  "base",                   "FLOW + unit",  "flow_asm_sieve_eval_64(Saturating Q48.16) + flow_asm_ring_load_u64",  1, false},
-    {"partition_alloc","base/allocator",         "FLOW",         "FlowQsbrEpoch + FlowUmaBuffer + FlowZeroFaultGuard",                  1, false},
-    {"blink_layout",   "third_party/blink",      "FLOW + bloom", "Q48.16 Subpixel Fixed-Point + FlowSvgUiNode64(O(1) Anchor Layout)",   1, false},
-    {"cc_scroll_jet",  "cc",                     "FLOW + bloom", "FlowJet2(2nd-Order Fling/Spring) + FLOW_QPOLY_DEFINE_EX",             1, false},
-    {"sandbox_bpf",    "sandbox",                "flowy + FLOW", "FlowLeanAbiDesc64(64B Policy Table) + 4-Mode Fused Sieve(0x3FFF)",    1, false},
-    {"gpu_cmd_buffer", "gpu",                    "bloom",        "FlowGpuCmdDesc64 + FlowGpuCsgOp64 + FlowProceduralMaterial64",        2, false},
-    {"skia_viz",       "components/viz",         "bloom",        "FlowSvgUiState64 + Wave64 Tile Bitmask + Triple-Buffered Broadcast",  2, false},
-    {"ui_ime_font",    "ui",                     "bloom + unit", "FlowFontAtlasGlyph64 + FlowImeComposition64 + unit_utf8_dfa_step",    2, false},
-    {"media_audio",    "media",                  "bloom",        "FlowAudioSynthDesc64(Modal/Karplus-Strong/Waveguide)",                2, false}
-};
-
-static void run_differential_wind_tunnel(TargetMapReport *rep, const char *emit_corpus_path) {
+static void run_differential_wind_tunnel(StructuralMapReport *rep, const char *emit_corpus_path) {
     struct rusage ru_before, ru_after;
     getrusage(RUSAGE_SELF, &ru_before);
 
@@ -251,7 +460,6 @@ static void run_differential_wind_tunnel(TargetMapReport *rep, const char *emit_
     MapTargetPoly1D_set_hysteresis(&gov, 0, 73728, 57344);
     uint64_t hyst_mask = 0ULL;
 
-    /* 1. Measure Target Baseline Pattern (nospec mask + branchy overflow + refcount check) */
     struct timespec ts0, ts1, tf0, tf1;
     clock_gettime(CLOCK_MONOTONIC, &ts0);
     volatile uint64_t baseline_sink = 0;
@@ -276,7 +484,6 @@ static void run_differential_wind_tunnel(TargetMapReport *rep, const char *emit_
     rep->baseline_cycles = (ns_base > 0ULL) ? ns_base : rep->trials;
     (void)baseline_sink;
 
-    /* 2. Measure FLOW + unit + bloom Fused Fastpath Pattern */
     FILE *cf = emit_corpus_path ? fopen(emit_corpus_path, "wb") : NULL;
     uint64_t arith_hash = flowy_hash64("arith", 5, FLOW_GOLDEN_RATIO_64);
     clock_gettime(CLOCK_MONOTONIC, &tf0);
@@ -333,6 +540,7 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
     bool run_bench = true;
     bool check_gaps = false;
     uint64_t trials = 10000ULL;
+    uint64_t max_files = 4096ULL;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -347,6 +555,9 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
         } else if (strcmp(argv[i], "--trials") == 0 && i + 1 < argc) {
             trials = (uint64_t)strtoull(argv[++i], NULL, 10);
             if (trials == 0ULL) trials = 10000ULL;
+        } else if (strcmp(argv[i], "--max-files") == 0 && i + 1 < argc) {
+            max_files = (uint64_t)strtoull(argv[++i], NULL, 10);
+            if (max_files == 0ULL) max_files = 4096ULL;
         } else if (strcmp(argv[i], "--emit-corpus") == 0 && i + 1 < argc) {
             emit_corpus_path = argv[++i];
         } else if (argv[i][0] != '-') {
@@ -355,139 +566,34 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
     }
 
     if (!target_dir) {
-        fprintf(stderr, "Error: flowy map requires <target_dir> (e.g., ../flux or ../chromium).\n");
+        fprintf(stderr, "Error: flowy map requires <target_dir>.\n");
         return 1;
     }
-    if (!path_exists(target_dir, "")) {
-        fprintf(stderr, "Error: target directory '%s' does not exist.\n", target_dir);
+    struct stat st;
+    if (stat(target_dir, &st) != 0) {
+        fprintf(stderr, "Error: target path '%s' does not exist.\n", target_dir);
         return 1;
     }
 
-    TargetMapReport rep;
+    StructuralMapReport rep;
     memset(&rep, 0, sizeof(rep));
     snprintf(rep.target_path, sizeof(rep.target_path), "%s", target_dir);
     rep.trials = trials;
+    rep.max_files_limit = max_files;
 
-    bool has_linux = path_exists(target_dir, "Kbuild") || path_exists(target_dir, "io_uring/io_uring.c");
-    bool has_chromium = path_exists(target_dir, "third_party/blink") || path_exists(target_dir, "mojo");
+    walk_directory_recursive(target_dir, &rep, 0);
 
-    if (has_linux && has_chromium) {
-        char lver[32] = {0}, cver[32] = {0};
-        detect_linux_version(target_dir, lver, sizeof(lver));
-        detect_chromium_version(target_dir, cver, sizeof(cver));
-        rep.kind = TARGET_CORPUS_DUAL;
-        snprintf(rep.corpus_kind_str, sizeof(rep.corpus_kind_str), "linux+chromium");
-        snprintf(rep.corpus_version, sizeof(rep.corpus_version), "linux-%s+chromium-%s", lver, cver);
-    } else if (has_linux) {
-        rep.kind = TARGET_CORPUS_LINUX;
-        snprintf(rep.corpus_kind_str, sizeof(rep.corpus_kind_str), "linux-kernel");
-        detect_linux_version(target_dir, rep.corpus_version, sizeof(rep.corpus_version));
-    } else if (has_chromium) {
-        rep.kind = TARGET_CORPUS_CHROMIUM;
-        snprintf(rep.corpus_kind_str, sizeof(rep.corpus_kind_str), "chromium-core");
-        detect_chromium_version(target_dir, rep.corpus_version, sizeof(rep.corpus_version));
-    } else {
-        rep.kind = TARGET_CORPUS_GENERIC;
-        snprintf(rep.corpus_kind_str, sizeof(rep.corpus_kind_str), "c-corpus");
-        snprintf(rep.corpus_version, sizeof(rep.corpus_version), "custom");
-    }
+    rep.sig_arith_mask_total =
+        rep.sig_overflow_checks + rep.sig_saturating_clamps +
+        rep.sig_fixed_point_shifts + rep.sig_cyclic_ring_masks;
 
-    if (rep.kind == TARGET_CORPUS_LINUX || rep.kind == TARGET_CORPUS_DUAL || rep.kind == TARGET_CORPUS_GENERIC) {
-        size_t len = sizeof(k_linux_subsystems) / sizeof(k_linux_subsystems[0]);
-        for (size_t i = 0; i < len; ++i) {
-            rep.subsystems_probed++;
-            k_linux_subsystems[i].present = path_exists(target_dir, k_linux_subsystems[i].rel_probe_path);
-            if (k_linux_subsystems[i].present || rep.kind == TARGET_CORPUS_GENERIC) {
-                if (k_linux_subsystems[i].present) rep.subsystems_present++;
-                if (k_linux_subsystems[i].tier == 1U) rep.tier1_isomorphic_count++;
-                else if (k_linux_subsystems[i].tier == 2U) rep.tier2_fastpath_abi_count++;
-                else rep.tier3_host_provider_count++;
-            }
-        }
-    }
-    if (rep.kind == TARGET_CORPUS_CHROMIUM || rep.kind == TARGET_CORPUS_DUAL) {
-        size_t len = sizeof(k_chromium_subsystems) / sizeof(k_chromium_subsystems[0]);
-        for (size_t i = 0; i < len; ++i) {
-            rep.subsystems_probed++;
-            k_chromium_subsystems[i].present = path_exists(target_dir, k_chromium_subsystems[i].rel_probe_path);
-            if (k_chromium_subsystems[i].present || rep.kind == TARGET_CORPUS_CHROMIUM) {
-                if (k_chromium_subsystems[i].present) rep.subsystems_present++;
-                if (k_chromium_subsystems[i].tier == 1U) rep.tier1_isomorphic_count++;
-                else if (k_chromium_subsystems[i].tier == 2U) rep.tier2_fastpath_abi_count++;
-                else rep.tier3_host_provider_count++;
-            }
-        }
-    }
+    rep.sig_epoch_control_total =
+        rep.sig_atomic_epoch_sync + rep.sig_heap_lifecycle_churn +
+        rep.sig_dynamics_hysteresis;
 
-    uint32_t covered = rep.tier1_isomorphic_count + rep.tier2_fastpath_abi_count;
-    rep.coverage_permille = (rep.subsystems_probed > 0U)
-                                ? ((covered * 1000U) / rep.subsystems_probed)
-                                : 1000U;
-
-    /* Scan real hotspot patterns in target files */
-    if (rep.kind == TARGET_CORPUS_LINUX || rep.kind == TARGET_CORPUS_DUAL) {
-        rep.uapi_ring_structs_matched +=
-            count_substr_in_file(target_dir, "include/uapi/linux/io_uring.h", "struct io_uring_sqe") +
-            count_substr_in_file(target_dir, "include/uapi/linux/io_uring.h", "struct io_uring_cqe") +
-            count_substr_in_file(target_dir, "include/uapi/linux/io_uring.h", "struct io_uring_buf") +
-            count_substr_in_file(target_dir, "io_uring/kbuf.c", "io_ring_head_to_buf");
-
-        rep.nospec_bounds_hotspots +=
-            count_substr_in_file(target_dir, "include/linux/nospec.h", "array_index_nospec") +
-            count_substr_in_file(target_dir, "include/linux/nospec.h", "array_index_mask_nospec") +
-            count_substr_in_file(target_dir, "io_uring/kbuf.c", "bl->mask");
-
-        rep.overflow_check_hotspots +=
-            count_substr_in_file(target_dir, "include/linux/overflow.h", "check_add_overflow") +
-            count_substr_in_file(target_dir, "include/linux/overflow.h", "check_sub_overflow") +
-            count_substr_in_file(target_dir, "include/linux/overflow.h", "check_mul_overflow") +
-            count_substr_in_file(target_dir, "io_uring/kbuf.c", "min_left_sub_one");
-
-        rep.refcount_rcu_hotspots +=
-            count_substr_in_file(target_dir, "io_uring/refs.h", "atomic_dec_and_test") +
-            count_substr_in_file(target_dir, "io_uring/refs.h", "req_ref_zero_or_close_to_overflow") +
-            count_substr_in_file(target_dir, "io_uring/kbuf.c", "kfree") +
-            count_substr_in_file(target_dir, "io_uring/bpf_filter.c", "rcu_dereference");
-
-        rep.filter_sandbox_hotspots +=
-            count_substr_in_file(target_dir, "io_uring/bpf_filter.c", "bpf_prog_run") +
-            count_substr_in_file(target_dir, "io_uring/bpf_filter.c", "io_bpf_filter");
-    }
-    if (rep.kind == TARGET_CORPUS_CHROMIUM || rep.kind == TARGET_CORPUS_DUAL) {
-        rep.uapi_ring_structs_matched +=
-            count_substr_in_file(target_dir, "mojo/public/c/system/data_pipe.h", "MojoCreateDataPipeOptions") +
-            count_substr_in_file(target_dir, "mojo/public/c/system/message_pipe.h", "MojoCreateMessagePipeOptions") +
-            count_substr_in_file(target_dir, "gpu/command_buffer/common/cmd_buffer_common.h", "CommandHeader") +
-            count_substr_in_file(target_dir, "components/viz/common/quads/compositor_frame.h", "CompositorFrame") + 4ULL;
-
-        rep.nospec_bounds_hotspots +=
-            count_substr_in_file(target_dir, "base/numerics/clamped_math_impl.h", "ClampedAddOp") +
-            count_substr_in_file(target_dir, "base/numerics/clamped_math_impl.h", "ClampedSubOp") +
-            count_substr_in_file(target_dir, "third_party/blink/renderer/platform/geometry/layout_unit.h", "Clamp") +
-            count_substr_in_file(target_dir, "third_party/blink/renderer/platform/geometry/layout_unit.h", "Saturated") + 4ULL;
-
-        rep.overflow_check_hotspots +=
-            count_substr_in_file(target_dir, "base/numerics/checked_math_impl.h", "CheckedAddOp") +
-            count_substr_in_file(target_dir, "base/numerics/checked_math_impl.h", "CheckedSubOp") +
-            count_substr_in_file(target_dir, "base/numerics/checked_math_impl.h", "CheckedMulOp") +
-            count_substr_in_file(target_dir, "third_party/blink/renderer/platform/geometry/layout_unit.h", "REPORT_OVERFLOW") + 4ULL;
-
-        rep.refcount_rcu_hotspots +=
-            count_substr_in_file(target_dir, "cc/input/scroll_elasticity_helper.cc", "ScrollElasticityHelper") +
-            count_substr_in_file(target_dir, "base/allocator/partition_allocator/src/partition_alloc/partition_root.h", "PartitionRoot") + 4ULL;
-
-        rep.filter_sandbox_hotspots +=
-            count_substr_in_file(target_dir, "sandbox/linux/bpf_dsl/policy_compiler.cc", "PolicyCompiler") +
-            count_substr_in_file(target_dir, "sandbox/linux/bpf_dsl/verifier.cc", "Verifier") +
-            count_substr_in_file(target_dir, "ui/base/ime/composition_text.h", "CompositionText") + 2ULL;
-    }
-    if (rep.kind == TARGET_CORPUS_GENERIC) {
-        rep.uapi_ring_structs_matched = 4ULL;
-        rep.nospec_bounds_hotspots = 4ULL;
-        rep.overflow_check_hotspots = 4ULL;
-        rep.refcount_rcu_hotspots = 4ULL;
-        rep.filter_sandbox_hotspots = 2ULL;
-    }
+    rep.sig_dispatch_filter_total =
+        rep.sig_branchy_switch_dispatch + rep.sig_opcode_command_streams +
+        rep.sig_policy_filter_hooks;
 
 #if defined(FLOWY_HAS_ECOSYSTEM_HEADERS)
     rep.abi_gaps_detected = (sizeof(UnitCell128) == 16U && sizeof(FlowGpuCsgOp64) == 64U &&
@@ -506,19 +612,27 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
         flowy_json_start();
         flowy_json_field_str("subcommand", "map", true);
         flowy_json_field_str("target_path", rep.target_path, true);
-        flowy_json_field_str("corpus_kind", rep.corpus_kind_str, true);
-        flowy_json_field_str("corpus_version", rep.corpus_version, true);
-        flowy_json_field_u64("subsystems_probed", rep.subsystems_probed, true);
-        flowy_json_field_u64("subsystems_present", rep.subsystems_present, true);
-        flowy_json_field_u64("tier1_isomorphic_count", rep.tier1_isomorphic_count, true);
-        flowy_json_field_u64("tier2_fastpath_abi_count", rep.tier2_fastpath_abi_count, true);
-        flowy_json_field_u64("tier3_host_provider_count", rep.tier3_host_provider_count, true);
-        flowy_json_field_u64("ecosystem_scope_permille", rep.coverage_permille, true);
-        flowy_json_field_u64("uapi_ring_structs_matched", rep.uapi_ring_structs_matched, true);
-        flowy_json_field_u64("nospec_bounds_hotspots", rep.nospec_bounds_hotspots, true);
-        flowy_json_field_u64("overflow_check_hotspots", rep.overflow_check_hotspots, true);
-        flowy_json_field_u64("refcount_rcu_hotspots", rep.refcount_rcu_hotspots, true);
-        flowy_json_field_u64("filter_sandbox_hotspots", rep.filter_sandbox_hotspots, true);
+        flowy_json_field_u64("files_scanned", rep.files_scanned, true);
+        flowy_json_field_u64("bytes_scanned", rep.bytes_scanned, true);
+        flowy_json_field_u64("structs_parsed", rep.structs_parsed, true);
+        flowy_json_field_u64("structs_16b_multiple", rep.structs_16b_multiple, true);
+        flowy_json_field_u64("structs_64b_multiple", rep.structs_64b_multiple, true);
+        flowy_json_field_u64("structs_zero_padding", rep.structs_zero_padding, true);
+        flowy_json_field_u64("structs_with_padding_holes", rep.structs_with_padding_holes, true);
+        flowy_json_field_u64("total_padding_hole_bytes", rep.total_padding_hole_bytes, true);
+        flowy_json_field_u64("sig_overflow_checks", rep.sig_overflow_checks, true);
+        flowy_json_field_u64("sig_saturating_clamps", rep.sig_saturating_clamps, true);
+        flowy_json_field_u64("sig_fixed_point_shifts", rep.sig_fixed_point_shifts, true);
+        flowy_json_field_u64("sig_cyclic_ring_masks", rep.sig_cyclic_ring_masks, true);
+        flowy_json_field_u64("sig_arith_mask_total", rep.sig_arith_mask_total, true);
+        flowy_json_field_u64("sig_atomic_epoch_sync", rep.sig_atomic_epoch_sync, true);
+        flowy_json_field_u64("sig_heap_lifecycle_churn", rep.sig_heap_lifecycle_churn, true);
+        flowy_json_field_u64("sig_dynamics_hysteresis", rep.sig_dynamics_hysteresis, true);
+        flowy_json_field_u64("sig_epoch_control_total", rep.sig_epoch_control_total, true);
+        flowy_json_field_u64("sig_branchy_switch_dispatch", rep.sig_branchy_switch_dispatch, true);
+        flowy_json_field_u64("sig_opcode_command_streams", rep.sig_opcode_command_streams, true);
+        flowy_json_field_u64("sig_policy_filter_hooks", rep.sig_policy_filter_hooks, true);
+        flowy_json_field_u64("sig_dispatch_filter_total", rep.sig_dispatch_filter_total, true);
         flowy_json_field_u64("abi_gaps_detected", rep.abi_gaps_detected, true);
         flowy_json_field_u64("baseline_cycles", rep.baseline_cycles, true);
         flowy_json_field_u64("flow_ecosystem_cycles", rep.flow_ecosystem_cycles, true);
@@ -527,35 +641,44 @@ int cmd_map_run(int argc, char **argv, bool json_mode) {
         flowy_json_field_bool("univalent_16b_64b_verified", rep.abi_gaps_detected == 0U, false);
         flowy_json_end();
     } else {
-        printf("=== FLOWY Cross-Ecosystem Target Corpus Map (FLOW + unit + bloom) ===\n");
-        printf("  Target Path           : %s\n", rep.target_path);
-        printf("  Detected Corpus       : %s (version: %s)\n", rep.corpus_kind_str, rep.corpus_version);
-        printf("  Subsystems Present    : %u / %u\n", rep.subsystems_present, rep.subsystems_probed);
-        printf("  Tier 1 (100%% Isomorph): %u subsystems (Math, Ring I/O, QSBR, Sched, Lean/BPF, Crypto)\n",
-               rep.tier1_isomorphic_count);
-        printf("  Tier 2 (Fastpath ABI) : %u subsystems (Net, Block, MM, GPU/DRM, Sound/HID, Arch)\n",
-               rep.tier2_fastpath_abi_count);
-        printf("  Tier 3 (Host Provider): %u subsystems (Bus Drivers, Legacy Disk FS, Boot, KVM)\n",
-               rep.tier3_host_provider_count);
-        printf("  Ecosystem Scope       : %u.%u%% (%u / %u subsystems covered by FLOW+unit+bloom)\n\n",
-               rep.coverage_permille / 10U, rep.coverage_permille % 10U,
-               rep.tier1_isomorphic_count + rep.tier2_fastpath_abi_count, rep.subsystems_probed);
+        printf("=== FLOWY Pure Syntax & Struct-Geometry Corpus Map (0 App Strings) ===\n");
+        printf("  Target Path                  : %s\n", rep.target_path);
+        printf("  Files / Bytes Scanned        : %" PRIu64 " files (%" PRIu64 " bytes)\n\n",
+               rep.files_scanned, rep.bytes_scanned);
 
-        printf("  [4-Basis Target Hotspot Extraction]\n");
-        printf("    1. unit 16B Wire/Ring Isomorphism  : %" PRIu64 " UAPI ring descriptors/macros matched\n",
-               rep.uapi_ring_structs_matched);
-        printf("    2. FLOW ASM Z/2^kZ & Overflow Guard: %" PRIu64 " nospec + %" PRIu64 " overflow hotspots mapped\n",
-               rep.nospec_bounds_hotspots, rep.overflow_check_hotspots);
-        printf("    3. FLOW QSBR & 2-Jet Control Loop  : %" PRIu64 " refcount/RCU/kfree race hotspots mapped\n",
-               rep.refcount_rcu_hotspots);
-        printf("    4. bloom 64B ABI & Lean Policy Gate: %" PRIu64 " runtime BPF/filter hooks mapped\n\n",
-               rep.filter_sandbox_hotspots);
+        printf("  [1. Struct Geometry Signatures -> unit 16B UnitCell128 & bloom 64B ABI]\n");
+        printf("    Structs Parsed             : %" PRIu64 "\n", rep.structs_parsed);
+        printf("    16B-Multiple Structs       : %" PRIu64 " (isomorphic to k x UnitCell128)\n",
+               rep.structs_16b_multiple);
+        printf("    64B-Multiple Structs       : %" PRIu64 " (isomorphic to k x Flow*64 Cache-Line)\n",
+               rep.structs_64b_multiple);
+        printf("    Zero-Padding Structs       : %" PRIu64 "\n", rep.structs_zero_padding);
+        printf("    Structs w/ Padding Holes   : %" PRIu64 " (%" PRIu64 " wasted padding bytes eliminated by 16B/64B ABI)\n\n",
+               rep.structs_with_padding_holes, rep.total_padding_hole_bytes);
+
+        printf("  [2. Arithmetic & Cyclic Mask Signatures -> FLOW 14-Axis ASM & Q48.16]\n");
+        printf("    Overflow Check Sites       : %" PRIu64 "\n", rep.sig_overflow_checks);
+        printf("    Saturating / Clamp Sites   : %" PRIu64 "\n", rep.sig_saturating_clamps);
+        printf("    Fixed-Point / Q16 Shifts   : %" PRIu64 "\n", rep.sig_fixed_point_shifts);
+        printf("    Cyclic Ring Mask Sites     : %" PRIu64 "\n\n", rep.sig_cyclic_ring_masks);
+
+        printf("  [3. Epoch Sync & Dynamics Signatures -> FLOW QSBR & 2-Jet / Schmitt QPoly]\n");
+        printf("    Atomic / RCU / Refcount    : %" PRIu64 "\n", rep.sig_atomic_epoch_sync);
+        printf("    Dynamic Heap Churn Sites   : %" PRIu64 " (replaceable by FlowUmaBuffer + QSBR)\n",
+               rep.sig_heap_lifecycle_churn);
+        printf("    Dynamics / Hysteresis Sites: %" PRIu64 "\n\n", rep.sig_dynamics_hysteresis);
+
+        printf("  [4. Command Dispatch & Policy Signatures -> FlowLeanAbiDesc64 & bloom Cmd]\n");
+        printf("    Branchy switch() Dispatches: %" PRIu64 " (replaceable by 0-Switch LUT)\n",
+               rep.sig_branchy_switch_dispatch);
+        printf("    Opcode / Command Streams   : %" PRIu64 "\n", rep.sig_opcode_command_streams);
+        printf("    Policy / Filter / Verifier : %" PRIu64 "\n\n", rep.sig_policy_filter_hooks);
 
         printf("  [Differential Wind-Tunnel (%" PRIu64 " trials)]\n", rep.trials);
-        printf("    Target Baseline Cycles : %" PRIu64 "\n", rep.baseline_cycles);
-        printf("    FLOW Ecosystem Cycles  : %" PRIu64 "\n", rep.flow_ecosystem_cycles);
-        printf("    OOB / Overflow Escapes : %" PRIu64 "\n", rep.oob_or_overflow_escapes);
-        printf("    ABI Gaps Detected      : %u (16B UnitCell128 <-> 64B FLOW/bloom ABI Univalent)\n",
+        printf("    Target Baseline Time (ns)  : %" PRIu64 "\n", rep.baseline_cycles);
+        printf("    FLOW Ecosystem Time (ns)   : %" PRIu64 "\n", rep.flow_ecosystem_cycles);
+        printf("    OOB / Overflow Escapes     : %" PRIu64 "\n", rep.oob_or_overflow_escapes);
+        printf("    Ecosystem ABI Gaps         : %u (16B UnitCell128 <-> 64B FLOW/bloom Univalent)\n",
                rep.abi_gaps_detected);
     }
 

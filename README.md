@@ -34,7 +34,7 @@ In the `FLOW` architecture (as implemented across [`bloom`](../bloom) and [`flow
 | **`flowy diff`** | **5-Mode Algebraic Wind Tunnel, Zero-Fault Bench & 64B Corpus Replay** | `--mode <arith\|tunnel\|chatter\|conservation\|relativistic>`, `--bench`, `--auto-cegis`, `--emit-corpus <bin>`, `--corpus <bin>` |
 | **`flowy qpoly`** | **Conservative Inner Polytope Quantizer & Hysteresis Calculator** | `--dim <1..4>`, `--threshold <T>`, `--deadband <D>`, `--b-enter <E>`, `--b-exit <X>`, `--qshift-sweep`, `--auto-cegis` |
 | **`flowy sieve`** | **Fused 4-Mode (ASM+Jet2+HoTT/QPoly+QSBR) Sieve & Pullback Decoder** | `--fuse [q16]`, `--decode-tag <hex>`, `--decode-sieve <mask>`, `--homotopy <p> <q>`, `--quotient <m,e>`, `--wave64 <mask>`, `--check-qsbr`, `--capsule-encode`, `--capsule-decode`, `--verify-trace` |
-| **`flowy map`** | **Cross-Ecosystem Target Corpus Mapper (`flux` Linux / Chromium Core)** | `<target_dir>`, `--bench`, `--trials <N>`, `--emit-corpus <bin>`, `--check-gaps` (aliases: `flowy target`, `flowy corpus`) |
+| **`flowy map`** | **Pure Syntax & Struct-Geometry Corpus Mapper (0 App-Specific Strings)** | `<target_dir>`, `--max-files <N>`, `--bench`, `--trials <N>`, `--emit-corpus <bin>`, `--check-gaps` (aliases: `flowy target`, `flowy corpus`) |
 
 All subcommands support `--json` for deterministic machine-readable output in CI/CD Gate 0 pipelines.
 
