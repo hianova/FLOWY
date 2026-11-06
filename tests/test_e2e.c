@@ -324,6 +324,36 @@ int main(void) {
     }
     printf("  [PASS] MCA/Bench Gate & 64B Binary Corpus Replay Invariants\n");
 
-    printf("[E2E Test] All 9 integration & cross-layer univalence gates passed!\n");
+    /* 10. Verify Cross-Ecosystem Target Corpus Mapper (`flowy map` / `flowy target`) */
+    assert(system("./build/flowy map --help > /dev/null") == 0);
+    assert(system("./build/flowy map /nonexistent_dir_xyz > /dev/null 2>&1") != 0);
+    assert(system("./build/flowy map . --trials 2048 --emit-corpus build/tmp_map_corpus.bin --check-gaps --json > build/tmp_map_self.json") == 0);
+    assert(system("./build/flowy diff --corpus build/tmp_map_corpus.bin > /dev/null") == 0);
+    {
+        FILE *mf = fopen("build/tmp_map_self.json", "r");
+        assert(mf != NULL);
+        char mbuf[2048] = {0};
+        (void)fread(mbuf, 1, sizeof(mbuf) - 1, mf);
+        fclose(mf);
+        assert(strstr(mbuf, "\"subcommand\": \"map\"") != NULL);
+        assert(strstr(mbuf, "\"abi_gaps_detected\": 0") != NULL);
+        assert(strstr(mbuf, "\"oob_or_overflow_escapes\": 0") != NULL);
+        assert(strstr(mbuf, "\"univalent_16b_64b_verified\": true") != NULL);
+    }
+    /* Test Chromium Core target layout detection */
+    assert(system("mkdir -p build/tmp_chromium_mock/third_party/blink build/tmp_chromium_mock/mojo build/tmp_chromium_mock/cc build/tmp_chromium_mock/gpu") == 0);
+    assert(system("./build/flowy target build/tmp_chromium_mock --check-gaps --json > build/tmp_map_chromium.json") == 0);
+    {
+        FILE *cmf = fopen("build/tmp_map_chromium.json", "r");
+        assert(cmf != NULL);
+        char cmbuf[2048] = {0};
+        (void)fread(cmbuf, 1, sizeof(cmbuf) - 1, cmf);
+        fclose(cmf);
+        assert(strstr(cmbuf, "\"corpus_kind\": \"chromium-core\"") != NULL);
+        assert(strstr(cmbuf, "\"abi_gaps_detected\": 0") != NULL);
+    }
+    printf("  [PASS] Cross-Ecosystem Target Corpus Mapper (Linux flux & Chromium Core) Invariants\n");
+
+    printf("[E2E Test] All 10 integration & cross-layer univalence gates passed!\n");
     return 0;
 }

@@ -65,6 +65,7 @@ int cmd_qpoly_run(int argc, char **argv, bool json_mode);
 int cmd_diff_run(int argc, char **argv, bool json_mode);
 int cmd_lean_run(int argc, char **argv, bool json_mode);
 int cmd_sieve_run(int argc, char **argv, bool json_mode);
+int cmd_map_run(int argc, char **argv, bool json_mode);
 
 /* JSON Helper Utilities */
 void flowy_json_start(void);

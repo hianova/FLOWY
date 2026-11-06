@@ -12,7 +12,8 @@ static void print_top_help(void) {
            "    lean      Lean 4 formal proof verifier, coverage auditor & 64B FLOW ABI bridge (0 sorryAx)\n"
            "    qpoly     Conservative inner polytope quantizer & hysteresis deadband calculator\n"
            "    diff      Dual-domain M_Ideal <-> B_64 algebraic wind tunnel, zero-fault bench & 64B corpus replay\n"
-           "    sieve     Fused 4-mode (ASM+Jet2+HoTT/QPoly+QSBR) sieve, Wave64, QSBR & Hex128 pullback decoder\n\n"
+           "    sieve     Fused 4-mode (ASM+Jet2+HoTT/QPoly+QSBR) sieve, Wave64, QSBR & Hex128 pullback decoder\n"
+           "    map       Cross-ecosystem target corpus mapper & differential auditor (Linux flux / Chromium Core)\n\n"
            "GLOBAL OPTIONS:\n"
            "    --json        Deterministic JSON output for Agent / CI Gate 0 consumption\n"
            "    -h, --help    Print help information\n"
@@ -48,6 +49,8 @@ int main(int argc, char **argv) {
         return cmd_lean_run(sub_argc, sub_argv, json_mode);
     } else if (strcmp(subcmd, "sieve") == 0) {
         return cmd_sieve_run(sub_argc, sub_argv, json_mode);
+    } else if (strcmp(subcmd, "map") == 0 || strcmp(subcmd, "target") == 0 || strcmp(subcmd, "corpus") == 0) {
+        return cmd_map_run(sub_argc, sub_argv, json_mode);
     } else {
         fprintf(stderr, "Error: unrecognized subcommand '%s'. See --help.\n", subcmd);
         return 1;

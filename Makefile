@@ -2,6 +2,9 @@ CC ?= cc
 FLOWY_VERSION := $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo "1.1.0")
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -O3 -DFLOWY_VERSION_STRING=\"$(FLOWY_VERSION)\"
 FLOW_DIR ?= $(abspath ../FLOW)
+UNIT_DIR ?= $(abspath ../unit)
+BLOOM_DIR ?= $(abspath ../bloom)
+FLUX_DIR ?= $(abspath ../flux)
 LEAN ?= $(shell command -v lean 2>/dev/null || echo $$HOME/.elan/bin/lean)
 
 ifneq ($(wildcard $(FLOW_DIR)/build/libflow_rt.a),)
@@ -14,12 +17,19 @@ else
     VENDOR_OBJ := build/flow_core.o
 endif
 
+ifneq ($(wildcard $(UNIT_DIR)/src/unit_isomorphism.h),)
+ifneq ($(wildcard $(BLOOM_DIR)/include/flow_gpu_abi.h),)
+    INCLUDES += -I$(UNIT_DIR)/src -I$(BLOOM_DIR)/include -DFLOWY_HAS_ECOSYSTEM_HEADERS=1
+endif
+endif
+
 SRCS := src/flowy_cli.c \
         src/cmd_slice.c \
         src/cmd_qpoly.c \
         src/cmd_diff.c \
         src/cmd_lean.c \
         src/cmd_sieve.c \
+        src/cmd_map.c \
         src/main.c
 
 OBJS := $(SRCS:src/%.c=build/%.o) $(VENDOR_OBJ)
@@ -58,6 +68,7 @@ test: $(TARGET)
 	$(TARGET) diff --help > /dev/null
 	$(TARGET) lean --help > /dev/null
 	$(TARGET) sieve --help > /dev/null
+	$(TARGET) map --help > /dev/null
 	$(TARGET) --version
 	# 2. Subcommand: slice (64B Univalence Audit, --audit-all, LLVM AST/IR/MCA & Git routing)
 	$(TARGET) slice src/flowy_cli.h --audit-struct FlowCorpusRecord64 --json > build/slice_corpus64.json
@@ -85,7 +96,9 @@ test: $(TARGET)
 	$(TARGET) sieve --capsule-encode "FLOW_UNIVALENT_CAPSULE_PAYLOAD" --json > build/capsule_enc.json
 	$(TARGET) sieve --capsule-decode 464c4f575f554e4956414c454e545f43415053554c455f5041594c4f4144000000000000000000000000000000000000000000000000000079c33513c3dc78b6 --json > build/capsule_dec.json
 	$(TARGET) sieve --verify-trace 0x3FF,0x3FE,0x3FC,0x3FF --json > build/sieve_trace.json
-	# 6. End-to-end integration test runner (including dynamic .lean -> 64B FLOW ABI verification)
+	# 6. Subcommand: map (Cross-Ecosystem Target Corpus Mapper for Linux flux / Chromium Core)
+	$(TARGET) map . --check-gaps --json > build/map_self.json
+	# 7. End-to-end integration test runner (including dynamic .lean -> 64B FLOW ABI verification)
 	$(CC) $(CFLAGS) $(INCLUDES) tests/test_e2e.c src/flowy_cli.c -o build/test_e2e $(LDFLAGS)
 	./build/test_e2e
 	@echo "=== All Tests Passed Successfully! ==="
