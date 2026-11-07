@@ -1,25 +1,25 @@
-# FLOWY (v1.1.0) — Gate 0 Cross-Layer Formal, Geometric & Hardware Auditor CLI
+# FLOWY — Gate 0 Cross-Layer Formal, Geometric & Hardware Auditor CLI
 
-`FLOWY` (`v1.1.0`) is the zero-dependency C11/C17 companion CLI and **Gate 0 Cross-Layer Auditor** for the `FLOW` (`libflow_rt.a`) runtime ecosystem (auditing [`bloom`](../bloom), [`unit`](../unit), and [`flow_agent`](../flow_agent)).
+`FLOWY` is the zero-dependency C11/C17 companion CLI and **Gate 0 Cross-Layer Auditor** for the `FLOW` (`libflow_rt.a`) runtime ecosystem (auditing [`BLOOM`](../BLOOM), [`UNIT`](../UNIT), [`flow_agent`](../flow_agent), [`flow_enbed`](../flow_enbed), and [`flow_neural`](../flow_neural)).
 
 ---
 
 ## Core Architectural Paradigm: How `FLOW` + `.lean` + `FLOWY` Work Together
 
-In the `FLOW` architecture (as implemented across [`bloom`](../bloom) and [`flow_agent`](../flow_agent)), **domain logic is never compiled at runtime by invoking a C compiler (`cc -shared`) or generating C/Metal template code**. Instead, the system separates responsibilities into three strict layers:
+In the `FLOW` architecture (as implemented across [`BLOOM`](../BLOOM), [`flow_agent`](../flow_agent), [`flow_enbed`](../flow_enbed), and [`flow_neural`](../flow_neural)), **domain logic is never compiled at runtime by invoking a C compiler (`cc -shared`) or generating C/Metal template code**. Instead, the system separates responsibilities into three strict layers:
 
 1. **`FLOW` Runtime (`libflow_rt.a`) — Pre-Compiled C17/ASM Algebraic Engine & 64-Byte Substrate**:
-   - Provides branchless hardware-flag-setting fixed-point arithmetic (`flow_asm_qadd_i64`, `flow_asm_qmul_shift16_i64`, `flow_asm_qsqrt_shift16_i64`), 1.58-bit ternary logic (`flow_bmf_ternary64_dot`), Wave64 ballot compaction (`flow_ballot_compact_wave64`), 2-Jet Taylor differential solvers (`FlowJet2`), conservative inner-quantized polytopes (`FLOW_QPOLY_DEFINE_EX`), and lock-free QSBR pointer hot-swapping (`FlowReloadContext`).
-   - Domain specifications (such as `.svg` vector paths in `bloom` or `.flx` statutes / `128-Hex` capsules in `flow_agent`) are parsed directly into **64-byte cache-line aligned descriptors** (`_Alignas(64)`, `sizeof == 64`) and routed through pre-compiled C17/ASM dispatch loops with **zero runtime compilation**, **zero heap allocation (`HeapCalls == 0`)**, and **zero floating-point drift (`FloatOps == 0`)**.
+   - Provides branchless hardware-flag-setting fixed-point arithmetic (`flow_asm_qadd_i64`, `flow_asm_qmul_shift16_i64`, `flow_asm_qsqrt_shift16_i64`), 1.58-bit ternary logic (`flow_bmf_ternary64_dot`), Wave64 ballot compaction (`flow_ballot_compact_wave64`), Goldilocks $\mathbb{F}_p$ modular arithmetic (`flow_asm_fp64_mul`), $\mathbb{F}_2$ bit-bijection (`flow_asm_biject_untemper32`), 1-cycle `rbit` QMC sequences (`flow_asm_radical_inverse_q16`), 2-Jet Taylor & impedance solvers (`FlowJet2`), conservative inner-quantized polytopes (`FLOW_QPOLY_DEFINE_EX`), and lock-free QSBR pointer hot-swapping (`FlowReloadContext`).
+   - Domain specifications (such as `.svg` vector paths in `BLOOM` or `.flx` statutes / `128-Hex` capsules in `flow_agent`) are parsed directly into **64-byte cache-line aligned descriptors** (`_Alignas(64)`, `sizeof == 64`) and routed through pre-compiled C17/ASM dispatch loops with **zero runtime compilation**, **zero heap allocation (`HeapCalls == 0`)**, and **zero floating-point drift (`FloatOps == 0`)**.
 
 2. **Lean 4 (`.lean`) — Compile-Time Formal Soundness Proof & 64-Byte ABI SSOT (`0 sorryAx`)**:
    - Proves that the C17/ASM descriptor routing algebra, integer conservation laws, hysteresis deadbands, and bitmask gates are mathematically sound (`by decide`, `by omega`, `by rfl`, `0 sorryAx`).
-   - `.lean` files do **not** generate C code; instead, `flowy lean` extracts their SSOT constants (`route_op_mask`, `b_enter_q16`, `b_exit_q16`, `weight_q16`, `qshift`, `req_mask`, `req_values`) directly into a 64-byte `FlowLeanAbiDesc64` binary descriptor (`--emit-abi` / `--verify-abi`) and certifies it against `FLOW` runtime operators (`FlowQPoly` hysteresis, `flow_cubical_step_neighbor`, `FlowJet2`).
+   - `.lean` files do **not** generate C code; instead, `flowy lean` extracts their SSOT constants (`route_op_mask`, `b_enter_q16`, `b_exit_q16`, `weight_q16`, `qshift`, `req_mask`, `req_values`) directly into a 64-byte `FlowLeanAbiDesc64` binary descriptor (`--emit-abi` / `--verify-abi`) and unified 512-byte `.flow` container (`--emit-image` / `--verify-image`), certifying it against `FLOW` runtime operators (`FlowQPoly` hysteresis, `flow_cubical_step_neighbor`, `FlowJet2`).
 
 3. **`FLOWY` (`flowy`) — Pure Gate 0 Cross-Layer Auditor & Algebraic Wind Tunnel**:
    - Like `clang` or `llvm-mca`, `flowy` carries zero bundled domain `.lean` files; downstream projects pass their own `.lean`, `.h`, `.c`, and `.metal` files to `flowy`.
    - Audits C/C++/Metal headers and sources to enforce `100% 64-Byte Cache-Line Univalence`, `FloatOps == 0`, `HeapCalls == 0`, and `StackSpills == 0` (`flowy slice`).
-   - Audits and batch-verifies Lean 4 proof files in parallel while checking transitive `def`/`abbrev` theorem coverage and packing/verifying 64-byte `FlowLeanAbiDesc64` descriptors (`flowy lean`).
+   - Audits and batch-verifies Lean 4 proof files in parallel while checking transitive `def`/`abbrev` theorem coverage and packing/verifying 64-byte `FlowLeanAbiDesc64` descriptors and `.flow` containers (`flowy lean`).
    - Runs 5-mode dual-domain algebraic wind-tunnel stress tests, zero-page-fault benchmarks, and 64-byte binary trajectory corpus recording/replay (`flowy diff`).
    - Computes conservative inner-quantized polytope bounds (`flowy qpoly`) and decodes 64-bit NaN-boxed boundary tags, 10-bit hardware sieves, Wave64 ballots, and Hex128 capsules (`flowy sieve`).
 
@@ -42,7 +42,7 @@ All subcommands support `--json` for deterministic machine-readable output in CI
 
 ## Standard Gate 0 Verification Workflow (`make verify-flowy`)
 
-Projects built on `FLOW` (such as [`../bloom`](../bloom/Makefile) and [`../flow_agent`](../flow_agent/Makefile)) run `flowy` as **Gate 0** before executing C/Python tests:
+Projects built on `FLOW` (such as [`../BLOOM`](../BLOOM/Makefile), [`../flow_agent`](../flow_agent/Makefile), [`../flow_enbed`](../flow_enbed/Makefile), and [`../flow_neural`](../flow_neural/Makefile)) run `flowy` as **Gate 0** before executing C/Python tests:
 
 ```bash
 # 1. Verify all C ABI structs are 100% 64-byte cache-line univalent (0 padding holes)
@@ -52,7 +52,7 @@ flowy slice include/flow_agent_abi.h --audit-all
 flowy slice src/flow_agent_core.c --llvm-ir --mca
 
 # 3. Verify Metal GPU shaders have 0 stack spills and bounded VGPR pressure (when applicable)
-flowy slice src/shader_bloom_sdf.metal --metal-air
+flowy slice src/shaders.metal --metal-air
 
 # 4. Verify all Lean 4 formal proofs in parallel (comment-aware 0 sorryAx + transitive def coverage + 64B ABI check)
 flowy lean --verify-all lean/*.lean

@@ -18,7 +18,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#if defined(FLOW_FREESTANDING) || (defined(__STDC_HOSTED__) && (__STDC_HOSTED__ == 0))
+#define FLOW_IS_FREESTANDING 1
+#else
+#define FLOW_IS_FREESTANDING 0
 #include <time.h>
+#endif
 
 #include "flow_hw_spec.h"
 
@@ -45,10 +51,10 @@ extern "C" {
  */
 
 #define FLOW_VERSION_MAJOR 4
-#define FLOW_VERSION_MINOR 0
-#define FLOW_VERSION_PATCH 1
+#define FLOW_VERSION_MINOR 1
+#define FLOW_VERSION_PATCH 0
 #ifndef FLOW_VERSION_STRING
-#define FLOW_VERSION_STRING "4.0.1"
+#define FLOW_VERSION_STRING "4.1.0"
 #endif
 #ifndef FLOW_GIT_BRANCH
 #define FLOW_GIT_BRANCH "main"
@@ -83,19 +89,33 @@ static inline uint64_t flow_hardware_cycles(void) {
     return val;
 #elif !defined(FLOW_FORCE_C17_FALLBACK) && (defined(__x86_64__) || defined(_M_X64))
     return __builtin_ia32_rdtsc();
-#else
+#elif !defined(FLOW_FORCE_C17_FALLBACK) && defined(__xtensa__)
+    uint32_t ccount = 0;
+    __asm__ __volatile__("rsr.ccount %0" : "=a"(ccount));
+    return (uint64_t)ccount;
+#elif !defined(FLOW_FORCE_C17_FALLBACK) && defined(__riscv)
+    uint32_t cyc = 0;
+    __asm__ __volatile__("rdcycle %0" : "=r"(cyc));
+    return (uint64_t)cyc;
+#elif !FLOW_IS_FREESTANDING && defined(CLOCK_MONOTONIC)
     struct timespec ts;
     return clock_gettime(CLOCK_MONOTONIC, &ts) == 0
                ? (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec
                : 0ULL;
+#else
+    return 0ULL;
 #endif
 }
 
 static inline uint64_t flow_clock_monotonic_ns(void) {
+#if !FLOW_IS_FREESTANDING && defined(CLOCK_MONOTONIC)
     struct timespec ts;
     return clock_gettime(CLOCK_MONOTONIC, &ts) == 0
                ? (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec
                : 0ULL;
+#else
+    return flow_hardware_cycles();
+#endif
 }
 
 uint64_t flow_hardware_timer_frequency_hz(void);
@@ -294,6 +314,77 @@ static inline FlowResultU64 flow_asm_qsub_i64(int64_t a, int64_t b, uint64_t *in
     return out;
 }
 
+/* ============================================================================
+ * 32-Bit MCU (Xtensa LX6/LX7 / RV32IMC) 128-Bit Exact Integer Helpers
+ * ============================================================================ */
+
+static inline void flow_mul_u64_to_u128(uint64_t a, uint64_t b, uint64_t *out_hi,
+                                        uint64_t *out_lo) {
+    uint64_t a0 = a & 0xFFFFFFFFULL;
+    uint64_t a1 = a >> 32U;
+    uint64_t b0 = b & 0xFFFFFFFFULL;
+    uint64_t b1 = b >> 32U;
+    uint64_t p00 = a0 * b0;
+    uint64_t p01 = a0 * b1;
+    uint64_t p10 = a1 * b0;
+    uint64_t p11 = a1 * b1;
+    uint64_t mid = (p00 >> 32U) + (p01 & 0xFFFFFFFFULL) + (p10 & 0xFFFFFFFFULL);
+    *out_lo = (p00 & 0xFFFFFFFFULL) | (mid << 32U);
+    *out_hi = p11 + (p01 >> 32U) + (p10 >> 32U) + (mid >> 32U);
+}
+
+static inline void flow_mul_i64_to_i128(int64_t a, int64_t b, int64_t *out_hi, uint64_t *out_lo) {
+    uint64_t uhi = 0ULL;
+    flow_mul_u64_to_u128((uint64_t)a, (uint64_t)b, &uhi, out_lo);
+    if (a < 0)
+        uhi -= (uint64_t)b;
+    if (b < 0)
+        uhi -= (uint64_t)a;
+    *out_hi = (int64_t)uhi;
+}
+
+static inline void flow_add_i128(int64_t a_hi, uint64_t a_lo, int64_t b_hi, uint64_t b_lo,
+                                 int64_t *out_hi, uint64_t *out_lo) {
+    uint64_t lo = a_lo + b_lo;
+    uint64_t carry = (lo < a_lo) ? 1ULL : 0ULL;
+    *out_lo = lo;
+    *out_hi = (int64_t)((uint64_t)a_hi + (uint64_t)b_hi + carry);
+}
+
+static inline void flow_shr16_i128(int64_t hi, uint64_t lo, int64_t *out_res, uint64_t *out_ovf) {
+    uint64_t ures = (lo >> 16U) | ((uint64_t)hi << 48U);
+    int64_t res = (int64_t)ures;
+    int64_t sign_res = (res < 0) ? -1 : 0;
+    int64_t sign_hi = (hi < 0) ? -((int64_t)((~(uint64_t)hi) >> 15U) + 1) : (hi >> 15U);
+    *out_res = res;
+    *out_ovf = (sign_res != sign_hi) ? 1ULL : 0ULL;
+}
+
+static inline uint64_t flow_isqrt_u128_pair(uint64_t hi, uint64_t lo) {
+    if (hi == 0ULL && lo == 0ULL)
+        return 0ULL;
+    uint64_t rem_hi = 0ULL;
+    uint64_t rem_lo = 0ULL;
+    uint64_t root = 0ULL;
+    for (int i = 0; i < 64; ++i) {
+        uint64_t top2 = (hi >> 62U) & 3ULL;
+        hi = (hi << 2U) | (lo >> 62U);
+        lo <<= 2U;
+        rem_hi = (rem_hi << 2U) | (rem_lo >> 62U);
+        rem_lo = (rem_lo << 2U) | top2;
+        uint64_t cand_lo = (root << 2U) | 1ULL;
+        uint64_t cand_hi = (root >> 62U);
+        root <<= 1U;
+        if (rem_hi > cand_hi || (rem_hi == cand_hi && rem_lo >= cand_lo)) {
+            uint64_t borrow = (rem_lo < cand_lo) ? 1ULL : 0ULL;
+            rem_lo -= cand_lo;
+            rem_hi -= (cand_hi + borrow);
+            root |= 1ULL;
+        }
+    }
+    return root;
+}
+
 static inline FlowResultU64 flow_asm_qmul_shift16_i64(int64_t a_q16, int64_t b_q16,
                                                       uint64_t *inout_sieve) {
     int64_t res = 0;
@@ -309,11 +400,16 @@ static inline FlowResultU64 flow_asm_qmul_shift16_i64(int64_t a_q16, int64_t b_q
             : [res] "=&r"(res), [lo] "=&r"(lo), [hi] "=&r"(hi), [ovf] "=r"(ovf)
             : [a] "r"(a_q16), [b] "r"(b_q16)
             : "cc");
-#else
+#elif defined(__SIZEOF_INT128__) && !defined(FLOW_FORCE_32BIT_FALLBACK)
     __extension__ typedef __int128 i128;
     i128 prod = ((i128)a_q16 * (i128)b_q16) >> 16;
     res = (int64_t)(uint64_t)prod;
     ovf = (prod > (i128)INT64_MAX || prod < (i128)INT64_MIN) ? 1ULL : 0ULL;
+#else
+    int64_t hi = 0;
+    uint64_t lo = 0;
+    flow_mul_i64_to_i128(a_q16, b_q16, &hi, &lo);
+    flow_shr16_i128(hi, lo, &res, &ovf);
 #endif
     if (__builtin_expect(ovf != 0ULL, 0)) {
         if (inout_sieve)
@@ -388,7 +484,7 @@ static inline FlowResultU64 flow_asm_qdot_i32(const int32_t *a, const int32_t *x
             dot = (acc_hi < 0) ? INT64_MIN : INT64_MAX;
         }
     }
-#else
+#elif defined(__SIZEOF_INT128__) && !defined(FLOW_FORCE_32BIT_FALLBACK)
     __extension__ typedef __int128 i128;
     i128 acc = 0;
     for (size_t j = 0; j < dim; ++j) {
@@ -402,6 +498,22 @@ static inline FlowResultU64 flow_asm_qdot_i32(const int32_t *a, const int32_t *x
         any_ovf = 1ULL;
     } else {
         dot = (int64_t)(uint64_t)acc;
+    }
+#else
+    int64_t acc_hi = 0;
+    uint64_t acc_lo = 0ULL;
+    for (size_t j = 0; j < dim; ++j) {
+        int64_t prod = (int64_t)a[j] * (int64_t)x[j];
+        int64_t p_hi = (prod < 0) ? -1 : 0;
+        flow_add_i128(acc_hi, acc_lo, p_hi, (uint64_t)prod, &acc_hi, &acc_lo);
+    }
+    int64_t res = (int64_t)acc_lo;
+    int64_t sign_ext = (res < 0) ? -1 : 0;
+    if (acc_hi != sign_ext) {
+        dot = (acc_hi < 0) ? INT64_MIN : INT64_MAX;
+        any_ovf = 1ULL;
+    } else {
+        dot = res;
     }
 #endif
     if (__builtin_expect(any_ovf != 0ULL, 0)) {
@@ -474,7 +586,7 @@ static inline int64_t flow_asm_qpoly4d_eval_plane(const int64_t a_q16[4], int64_
           [a2] "r"(a_q16[2]), [x2] "r"(x_q16[2]), [a3] "r"(a_q16[3]), [x3] "r"(x_q16[3])
         : "cc");
     dot_neg = ((int64_t)acc_hi < 0);
-#else
+#elif defined(__SIZEOF_INT128__) && !defined(FLOW_FORCE_32BIT_FALLBACK)
     __extension__ typedef __int128 i128;
     __extension__ typedef unsigned __int128 u128;
     u128 uacc = (u128)((i128)a_q16[0] * (i128)x_q16[0]) + (u128)((i128)a_q16[1] * (i128)x_q16[1]) +
@@ -483,6 +595,17 @@ static inline int64_t flow_asm_qpoly4d_eval_plane(const int64_t a_q16[4], int64_
     dot_q16 = (int64_t)(uint64_t)shifted;
     dot_ovf = (shifted > (i128)INT64_MAX || shifted < (i128)INT64_MIN) ? 1ULL : 0ULL;
     dot_neg = (shifted < 0);
+#else
+    int64_t acc_hi = 0;
+    uint64_t acc_lo = 0ULL;
+    for (int k = 0; k < 4; ++k) {
+        int64_t phi = 0;
+        uint64_t plo = 0ULL;
+        flow_mul_i64_to_i128(a_q16[k], x_q16[k], &phi, &plo);
+        flow_add_i128(acc_hi, acc_lo, phi, plo, &acc_hi, &acc_lo);
+    }
+    flow_shr16_i128(acc_hi, acc_lo, &dot_q16, &dot_ovf);
+    dot_neg = (acc_hi < 0);
 #endif
     if (__builtin_expect(dot_ovf != 0ULL, 0)) {
         dot_q16 = dot_neg ? INT64_MIN : INT64_MAX;
@@ -509,6 +632,52 @@ static inline int64_t flow_asm_qpoly4d_eval_plane(const int64_t a_q16[4], int64_
  * Pillar B: Exact 128-Bit Q16 Division, ISQRT, EMA, Solvency & Domain Sieve
  * ============================================================================ */
 
+#if defined(__SIZEOF_INT128__)
+__extension__ static inline unsigned __int128 flow_u128_div_u128(unsigned __int128 num,
+                                                                 unsigned __int128 den) {
+    if (den == 0U)
+        return 0U;
+    if (((num | den) >> 64U) == 0U) {
+        return (unsigned __int128)((uint64_t)num / (uint64_t)den);
+    }
+    if (num < den)
+        return 0U;
+    __extension__ typedef unsigned __int128 u128;
+    uint64_t n_hi = (uint64_t)(num >> 64U), n_lo = (uint64_t)num;
+    uint64_t d_hi = (uint64_t)(den >> 64U), d_lo = (uint64_t)den;
+    uint32_t clz_n =
+        (n_hi != 0ULL) ? (uint32_t)__builtin_clzll(n_hi) : (64U + (uint32_t)__builtin_clzll(n_lo));
+    uint32_t clz_d =
+        (d_hi != 0ULL) ? (uint32_t)__builtin_clzll(d_hi) : (64U + (uint32_t)__builtin_clzll(d_lo));
+    uint32_t shift = clz_d - clz_n;
+    u128 d_shifted = den << shift;
+    u128 rem = num;
+    u128 quot = 0U;
+    for (uint32_t i = 0U; i <= shift; ++i) {
+        quot <<= 1U;
+        if (rem >= d_shifted) {
+            rem -= d_shifted;
+            quot |= 1U;
+        }
+        d_shifted >>= 1U;
+    }
+    return quot;
+}
+
+__extension__ static inline __int128 flow_i128_div_i128(__int128 num, __int128 den) {
+    if (den == 0)
+        return 0;
+    __extension__ typedef unsigned __int128 u128;
+    bool neg = (num < 0) ^ (den < 0);
+    u128 unum = (num < 0) ? (0U - (u128)num) : (u128)num;
+    u128 uden = (den < 0) ? (0U - (u128)den) : (u128)den;
+    u128 uq = flow_u128_div_u128(unum, uden);
+    if (uq == 0U)
+        return 0;
+    return neg ? -(__int128)(uq - 1U) - 1 : (__int128)uq;
+}
+#endif
+
 static inline FlowResultU64 flow_asm_qdiv_shift16_i64(int64_t num_q16, int64_t den_q16,
                                                       uint64_t *inout_sieve) {
     if (__builtin_expect(den_q16 == 0, 0)) {
@@ -523,8 +692,9 @@ static inline FlowResultU64 flow_asm_qdiv_shift16_i64(int64_t num_q16, int64_t d
                                                 (uint8_t)FLOW_BOUNDARY_DOMAIN_SINGULARITY, 0U, 1U)};
         return out;
     }
+#if defined(__SIZEOF_INT128__) && !defined(FLOW_FORCE_32BIT_FALLBACK)
     __extension__ typedef __int128 i128;
-    i128 quot = ((i128)num_q16 * (i128)FLOW_Q16_ONE) / (i128)den_q16;
+    i128 quot = flow_i128_div_i128((i128)num_q16 * (i128)FLOW_Q16_ONE, (i128)den_q16);
     if (__builtin_expect(quot > (i128)INT64_MAX || quot < (i128)INT64_MIN, 0)) {
         int64_t sat = (quot > 0) ? INT64_MAX : INT64_MIN;
         if (inout_sieve)
@@ -536,6 +706,45 @@ static inline FlowResultU64 flow_asm_qdiv_shift16_i64(int64_t num_q16, int64_t d
     }
     FlowResultU64 out = {(uint64_t)(int64_t)quot, 0ULL};
     return out;
+#else
+    bool neg = (num_q16 < 0) ^ (den_q16 < 0);
+    uint64_t unum = (num_q16 < 0) ? (0ULL - (uint64_t)num_q16) : (uint64_t)num_q16;
+    uint64_t uden = (den_q16 < 0) ? (0ULL - (uint64_t)den_q16) : (uint64_t)den_q16;
+    uint64_t dvd_hi = unum >> 48U;
+    uint64_t dvd_lo = unum << 16U;
+    if (dvd_hi >= uden) {
+        int64_t sat = neg ? INT64_MIN : INT64_MAX;
+        if (inout_sieve)
+            *inout_sieve &= ~(FLOW_ASM_SIEVE_INT_NO_OVERFLOW | FLOW_ASM_SIEVE_Q_NO_SATURATION);
+        FlowResultU64 out = {(uint64_t)sat, flow_hott_make_boundary_tag(
+                                                FLOW_HOTT_BOUNDARY_OVERFLOW, 4U,
+                                                (uint8_t)FLOW_BOUNDARY_DOMAIN_SINGULARITY, 0U, 2U)};
+        return out;
+    }
+    uint64_t rem = dvd_hi;
+    uint64_t uquot = 0ULL;
+    for (int i = 63; i >= 0; --i) {
+        uint64_t top = rem >> 63U;
+        rem = (rem << 1U) | ((dvd_lo >> (unsigned)i) & 1ULL);
+        if (top != 0ULL || rem >= uden) {
+            rem -= uden;
+            uquot |= (1ULL << (unsigned)i);
+        }
+    }
+    uint64_t max_mag = neg ? ((uint64_t)INT64_MAX + 1ULL) : (uint64_t)INT64_MAX;
+    if (__builtin_expect(uquot > max_mag, 0)) {
+        int64_t sat = neg ? INT64_MIN : INT64_MAX;
+        if (inout_sieve)
+            *inout_sieve &= ~(FLOW_ASM_SIEVE_INT_NO_OVERFLOW | FLOW_ASM_SIEVE_Q_NO_SATURATION);
+        FlowResultU64 out = {(uint64_t)sat, flow_hott_make_boundary_tag(
+                                                FLOW_HOTT_BOUNDARY_OVERFLOW, 4U,
+                                                (uint8_t)FLOW_BOUNDARY_DOMAIN_SINGULARITY, 0U, 2U)};
+        return out;
+    }
+    int64_t sq = neg ? (int64_t)(0ULL - uquot) : (int64_t)uquot;
+    FlowResultU64 out = {(uint64_t)sq, 0ULL};
+    return out;
+#endif
 }
 
 /*
@@ -543,6 +752,7 @@ static inline FlowResultU64 flow_asm_qdiv_shift16_i64(int64_t num_q16, int64_t d
  * seeded via hardware CLZ (`__builtin_clzll`) and monotone integer Newton contraction.
  * Zero floating-point instructions, zero ULP drift.
  */
+#if defined(__SIZEOF_INT128__)
 __extension__ static inline uint64_t flow_asm_isqrt_u128(unsigned __int128 x) {
     if (x == 0U)
         return 0ULL;
@@ -553,17 +763,22 @@ __extension__ static inline uint64_t flow_asm_isqrt_u128(unsigned __int128 x) {
                                   : ((63U - (uint32_t)__builtin_clzll(lo)) >> 1U);
     u128 r = ((u128)1U) << (shift + 1U);
     for (;;) {
-        u128 next = (r + x / r) >> 1U;
+        u128 next = (r + flow_u128_div_u128(x, r)) >> 1U;
         if (next >= r)
             break;
         r = next;
     }
     return (uint64_t)r;
 }
+#endif
 
 static inline uint64_t flow_asm_isqrt_u64(uint64_t x) {
+#if defined(__SIZEOF_INT128__) && !defined(FLOW_FORCE_32BIT_FALLBACK)
     __extension__ typedef unsigned __int128 u128;
     return flow_asm_isqrt_u128((u128)x);
+#else
+    return flow_isqrt_u128_pair(0ULL, x);
+#endif
 }
 
 static inline FlowResultU64 flow_asm_qsqrt_shift16_i64(int64_t x_q16, uint64_t *inout_sieve) {
@@ -576,8 +791,13 @@ static inline FlowResultU64 flow_asm_qsqrt_shift16_i64(int64_t x_q16, uint64_t *
                                                          0U, 1U)};
         return out;
     }
+#if defined(__SIZEOF_INT128__) && !defined(FLOW_FORCE_32BIT_FALLBACK)
     __extension__ typedef unsigned __int128 u128;
     uint64_t root_q16 = flow_asm_isqrt_u128(((u128)(uint64_t)x_q16) << FLOW_Q16_SHIFT);
+#else
+    uint64_t ux = (uint64_t)x_q16;
+    uint64_t root_q16 = flow_isqrt_u128_pair(ux >> 48U, ux << 16U);
+#endif
     return flow_result_u64_interior(root_q16);
 }
 
@@ -596,6 +816,7 @@ static inline FlowResultU64 flow_asm_qema_step_q16(int64_t prev_ema_q16, int64_t
                                                          (uint8_t)FLOW_BOUNDARY_PRECOND, 0U, 1U)};
         return out;
     }
+#if defined(__SIZEOF_INT128__) && !defined(FLOW_FORCE_32BIT_FALLBACK)
     __extension__ typedef __int128 i128;
     i128 w_prev = (i128)(FLOW_Q16_ONE - alpha_q16) * (i128)prev_ema_q16;
     i128 w_samp = (i128)alpha_q16 * (i128)sample_q16;
@@ -611,6 +832,24 @@ static inline FlowResultU64 flow_asm_qema_step_q16(int64_t prev_ema_q16, int64_t
         return out;
     }
     return flow_result_u64_interior((uint64_t)(int64_t)res);
+#else
+    int64_t p_hi = 0, s_hi = 0, sum_hi = 0, res = 0;
+    uint64_t p_lo = 0ULL, s_lo = 0ULL, sum_lo = 0ULL, ovf = 0ULL;
+    flow_mul_i64_to_i128(FLOW_Q16_ONE - alpha_q16, prev_ema_q16, &p_hi, &p_lo);
+    flow_mul_i64_to_i128(alpha_q16, sample_q16, &s_hi, &s_lo);
+    flow_add_i128(p_hi, p_lo, s_hi, s_lo, &sum_hi, &sum_lo);
+    flow_shr16_i128(sum_hi, sum_lo, &res, &ovf);
+    if (__builtin_expect(ovf != 0ULL, 0)) {
+        if (inout_sieve)
+            *inout_sieve &= ~FLOW_ASM_SIEVE_INT_NO_OVERFLOW;
+        int64_t sat = (sum_hi >= 0) ? INT64_MAX : INT64_MIN;
+        FlowResultU64 out = {(uint64_t)sat, flow_hott_make_boundary_tag(
+                                                FLOW_HOTT_BOUNDARY_OVERFLOW, 6U,
+                                                (uint8_t)FLOW_BOUNDARY_DOMAIN_SINGULARITY, 0U, 2U)};
+        return out;
+    }
+    return flow_result_u64_interior((uint64_t)res);
+#endif
 }
 
 /*
@@ -800,6 +1039,104 @@ static inline uint32_t flow_ballot_compact_wave64(uint64_t ballot_mask, uint32_t
 #define flow_gpu_ballot_lane_offset    flow_ballot_lane_offset
 #define flow_gpu_ballot_visible_count  flow_ballot_visible_count
 #define flow_gpu_ballot_compact_wave64 flow_ballot_compact_wave64
+
+/* ============================================================================
+ * Pillar E: Goldilocks Finite-Field F_p (p = 2^64 - 2^32 + 1), F_2 Bijection &
+ *           1-Cycle Hardware Bit-Reversal QMC (`rbit`)
+ * ============================================================================ */
+
+#define FLOW_GOLDILOCKS_PRIME UINT64_C(0xFFFFFFFF00000001)
+#define FLOW_GOLDILOCKS_EPS   UINT64_C(0xFFFFFFFF)
+
+static inline uint64_t flow_asm_fp64_reduce(uint64_t x) {
+    return (x >= FLOW_GOLDILOCKS_PRIME) ? (x - FLOW_GOLDILOCKS_PRIME) : x;
+}
+
+static inline uint64_t flow_asm_fp64_add(uint64_t a, uint64_t b) {
+    uint64_t ar = flow_asm_fp64_reduce(a);
+    uint64_t br = flow_asm_fp64_reduce(b);
+    uint64_t diff = FLOW_GOLDILOCKS_PRIME - br;
+    return (ar >= diff) ? (ar - diff) : (ar + br);
+}
+
+static inline uint64_t flow_asm_fp64_sub(uint64_t a, uint64_t b) {
+    uint64_t ar = flow_asm_fp64_reduce(a);
+    uint64_t br = flow_asm_fp64_reduce(b);
+    return (ar >= br) ? (ar - br) : (FLOW_GOLDILOCKS_PRIME - (br - ar));
+}
+
+static inline uint64_t flow_asm_fp64_mul(uint64_t a, uint64_t b) {
+    uint64_t ar = flow_asm_fp64_reduce(a);
+    uint64_t br = flow_asm_fp64_reduce(b);
+    uint64_t hi64 = 0ULL;
+    uint64_t lo64 = 0ULL;
+#if FLOW_HAS_INT128
+    __extension__ unsigned __int128 prod = (unsigned __int128)ar * (unsigned __int128)br;
+    lo64 = (uint64_t)prod;
+    hi64 = (uint64_t)(prod >> 64U);
+#else
+    flow_mul_u64_to_u128(ar, br, &hi64, &lo64);
+#endif
+    /* Identities mod p = 2^64 - 2^32 + 1: 2^64 == 2^32 - 1, and 2^96 == -1 */
+    uint64_t mid = hi64 & FLOW_GOLDILOCKS_EPS;
+    uint64_t hi = hi64 >> 32U;
+    uint64_t t0 = flow_asm_fp64_sub(flow_asm_fp64_reduce(lo64), hi);
+    uint64_t t1 = mid * FLOW_GOLDILOCKS_EPS;
+    return flow_asm_fp64_add(t0, t1);
+}
+
+static inline uint64_t flow_asm_rbit64(uint64_t x) {
+    uint64_t out = x;
+#if !defined(FLOW_FORCE_C17_FALLBACK) && (defined(__aarch64__) || defined(__arm64__))
+    __asm__("rbit %[out], %[in]" : [out] "=r"(out) : [in] "r"(x));
+#else
+    out =
+        ((out >> 1U) & UINT64_C(0x5555555555555555)) | ((out & UINT64_C(0x5555555555555555)) << 1U);
+    out =
+        ((out >> 2U) & UINT64_C(0x3333333333333333)) | ((out & UINT64_C(0x3333333333333333)) << 2U);
+    out =
+        ((out >> 4U) & UINT64_C(0x0F0F0F0F0F0F0F0F)) | ((out & UINT64_C(0x0F0F0F0F0F0F0F0F)) << 4U);
+    out = __builtin_bswap64(out);
+#endif
+    return out;
+}
+
+/* 1-Cycle Base-2 Van der Corput Quasi-Monte Carlo (QMC) Radical Inverse in Q16.16 [0..65535] */
+static inline int64_t flow_asm_radical_inverse_q16(uint64_t index) {
+    return (int64_t)(flow_asm_rbit64(index) >> 48U);
+}
+
+/* Bijective F_2 32-Bit Tempering & Exact Inverse Untempering */
+static inline uint32_t flow_asm_biject_temper32(uint32_t x) {
+    uint32_t y = x ^ (x >> 11U);
+    y ^= (y << 7U) & 0x9D2C5680U;
+    y ^= (y << 15U) & 0xEFC60000U;
+    y ^= (y >> 18U);
+    return y;
+}
+
+static inline uint32_t flow_asm_biject_untemper32(uint32_t y) {
+    uint32_t u = y ^ (y >> 18U);
+    u ^= (u << 15U) & 0xEFC60000U;
+    uint32_t s1 = u ^ ((u << 7U) & 0x9D2C5680U);
+    uint32_t s2 = u ^ ((s1 << 7U) & 0x9D2C5680U);
+    uint32_t s3 = u ^ ((s2 << 7U) & 0x9D2C5680U);
+    u ^= (s3 << 7U) & 0x9D2C5680U;
+    u ^= (u >> 11U) ^ (u >> 22U);
+    return u;
+}
+
+/* 64x64 Boolean Matrix-Vector Multiply over GF(2) via POPCNT Parity */
+static inline uint64_t flow_asm_gf2_matvec64(const uint64_t rows[64], uint64_t x) {
+    if (!rows)
+        return 0ULL;
+    uint64_t out = 0ULL;
+    for (uint32_t i = 0U; i < 64U; ++i) {
+        uint64_t parity = (uint64_t)__builtin_popcountll(rows[i] & x) & 1ULL;
+        out |= (parity << i);
+    }
+    return out;
+}
 
 #ifdef __cplusplus
 }
