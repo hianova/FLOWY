@@ -8,6 +8,10 @@
 #include <sys/wait.h>
 #include "flow_asm.h"
 #include "flow_hott_jet.h"
+#if defined(FLOWY_HAS_ECOSYSTEM_HEADERS)
+#include "flow_image64.h"
+#include "unit_isomorphism.h"
+#endif
 
 FLOW_QPOLY_DEFINE_EX(LeanAbiGovernorPoly, 1, 16, 4)
 
@@ -414,6 +418,7 @@ static int run_batch_lean_verify(const char **files, size_t count, bool json_mod
 
 int cmd_lean_run(int argc, char **argv, bool json_mode) {
     const char *from_lean = NULL, *emit_abi = NULL, *verify_abi = NULL;
+    const char *emit_image = NULL, *verify_image = NULL;
     bool verify = false, verify_all = false;
     const char *verify_files[64];
     size_t verify_file_count = 0;
@@ -427,6 +432,10 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
             emit_abi = (argv[i][10] == '=') ? argv[i] + 11 : argv[++i];
         else if ((strcmp(argv[i], "--verify-abi") == 0 && i + 1 < argc) || strncmp(argv[i], "--verify-abi=", 13) == 0)
             verify_abi = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
+        else if ((strcmp(argv[i], "--emit-image") == 0 && i + 1 < argc) || strncmp(argv[i], "--emit-image=", 13) == 0)
+            emit_image = (argv[i][12] == '=') ? argv[i] + 13 : argv[++i];
+        else if ((strcmp(argv[i], "--verify-image") == 0 && i + 1 < argc) || strncmp(argv[i], "--verify-image=", 15) == 0)
+            verify_image = (argv[i][14] == '=') ? argv[i] + 15 : argv[++i];
         else if (strcmp(argv[i], "--verify") == 0) verify = true;
         else if (argv[i][0] != '-') {
             if (verify_file_count < 64) verify_files[verify_file_count++] = argv[i];
@@ -511,6 +520,123 @@ int cmd_lean_run(int argc, char **argv, bool json_mode) {
             return 1;
         }
     }
+
+#if defined(FLOWY_HAS_ECOSYSTEM_HEADERS)
+    if (emit_image || verify_image) {
+        /* Pack 8-block (512B, 2^3 x 64B) Unified Univalent .flow Image:
+         *   Block 0   : FlowImageHeader64 (Superblock + Z/8Z cap_mask=7 + MAC)
+         *   Block 1   : FlowLeanAbiDesc64 (Config / Formal Contract — replaces TOML)
+         *   Block 2..3: 8 x UnitCell128   (Structured Key-Value & Rules — replaces JSON)
+         *   Block 4..7: 4 x FlowGpuCsgOp64 (Visual UI / 3D Prefab — replaces PDF/SVG/GLB)
+         */
+        FlowImageBlock64 img[8];
+        memset(img, 0, sizeof(img));
+
+        /* Block 1: Copy 64B FlowLeanAbiDesc64 */
+        memcpy(&img[1], &abi_desc, sizeof(FlowLeanAbiDesc64));
+
+        /* Block 2..3: Pack 8 x 16B UnitCell128 cells (7-bit ASCII keys on axis 1 & Q48.16 values on axis 0) */
+        uint64_t s_ok = UNIT_SIEVE_ALL_SOUND;
+        UnitCell128 c0 = unit_make_inline_ascii_cell((uint8_t)UNIT_OP_UTF8_MINBIT, 1U,
+                                                     0x007265746E655F62ULL /* "b_enter" */, 7U, &s_ok);
+        UnitCell128 c1;
+        c1.packet.protocol_header = unit_control_pack(
+            (uint8_t)UNIT_OP_LOAD_B_EXT, (uint8_t)UNIT_BIT_CLASS_RAW_BYTES,
+            (uint8_t)UNIT_CURRENT_INLINE_REG, 0U, (uint16_t)UNIT_SIEVE_ALL_SOUND, 64U);
+        c1.packet.body_slice = (uint64_t)(int64_t)abi_desc.b_enter_q16;
+
+        UnitCell128 c2 = unit_make_inline_ascii_cell((uint8_t)UNIT_OP_UTF8_MINBIT, 1U,
+                                                     0x0000746978655F62ULL /* "b_exit" */, 6U, &s_ok);
+        UnitCell128 c3;
+        c3.packet.protocol_header = unit_control_pack(
+            (uint8_t)UNIT_OP_LOAD_B_EXT, (uint8_t)UNIT_BIT_CLASS_RAW_BYTES,
+            (uint8_t)UNIT_CURRENT_INLINE_REG, 0U, (uint16_t)UNIT_SIEVE_ALL_SOUND, 64U);
+        c3.packet.body_slice = (uint64_t)(int64_t)abi_desc.b_exit_q16;
+
+        UnitCell128 c4;
+        c4.packet.protocol_header = unit_control_pack(
+            (uint8_t)UNIT_OP_LOAD_U_EXT, (uint8_t)UNIT_BIT_CLASS_RAW_BYTES,
+            (uint8_t)UNIT_CURRENT_INLINE_REG, 0U, (uint16_t)UNIT_SIEVE_ALL_SOUND, 64U);
+        c4.packet.body_slice = (uint64_t)(int64_t)abi_desc.weight_q16;
+
+        UnitCell128 c5;
+        c5.packet.protocol_header = unit_control_pack(
+            (uint8_t)UNIT_OP_SET_HYSTERESIS, (uint8_t)UNIT_BIT_CLASS_RAW_BYTES,
+            (uint8_t)UNIT_CURRENT_INLINE_REG, 2U, (uint16_t)UNIT_SIEVE_ALL_SOUND, 64U);
+        c5.packet.body_slice =
+            ((uint64_t)(uint32_t)abi_desc.b_enter_q16 << 32U) | (uint64_t)(uint32_t)abi_desc.b_exit_q16;
+
+        UnitCell128 c6;
+        c6.packet.protocol_header = unit_control_pack(
+            (uint8_t)UNIT_OP_EVAL_QPOLY, (uint8_t)UNIT_BIT_CLASS_RAW_BYTES,
+            (uint8_t)UNIT_CURRENT_INLINE_REG, 2U, (uint16_t)UNIT_SIEVE_ALL_SOUND, 64U);
+        c6.packet.body_slice = (uint64_t)abi_desc.route_op_mask;
+
+        UnitCell128 c7;
+        c7.packet.protocol_header = unit_control_pack(
+            (uint8_t)UNIT_OP_CUBICAL_STEP, (uint8_t)UNIT_BIT_CLASS_RAW_BYTES,
+            (uint8_t)UNIT_CURRENT_INLINE_REG, 2U, (uint16_t)UNIT_SIEVE_ALL_SOUND, 64U);
+        c7.packet.body_slice = abi_desc.req_mask;
+
+        memcpy(&img[2].cells[0], &c0, sizeof(UnitCell128));
+        memcpy(&img[2].cells[1], &c1, sizeof(UnitCell128));
+        memcpy(&img[2].cells[2], &c2, sizeof(UnitCell128));
+        memcpy(&img[2].cells[3], &c3, sizeof(UnitCell128));
+        memcpy(&img[3].cells[0], &c4, sizeof(UnitCell128));
+        memcpy(&img[3].cells[1], &c5, sizeof(UnitCell128));
+        memcpy(&img[3].cells[2], &c6, sizeof(UnitCell128));
+        memcpy(&img[3].cells[3], &c7, sizeof(UnitCell128));
+
+        /* Block 4..7: Pack 4 x 64B FlowGpuCsgOp64 visual prefab cards */
+        for (uint32_t k = 0U; k < 4U; ++k) {
+            img[4U + k].csg_op.op_id = k;
+            img[4U + k].csg_op.prim_type = FLOW_CSG_PRIM_BOX;
+            img[4U + k].csg_op.bool_op = FLOW_CSG_BOOL_UNION;
+            img[4U + k].csg_op.material_id = k + 1U;
+            img[4U + k].csg_op.pos_q16[0] = INT32_C(120) << 16;
+            img[4U + k].csg_op.pos_q16[1] = (int32_t)((16U + k * 32U) << 16);
+            img[4U + k].csg_op.extents_q16[0] = INT32_C(114) << 16;
+            img[4U + k].csg_op.extents_q16[1] = INT32_C(12) << 16;
+            img[4U + k].csg_op.bevel_r_q16 = INT32_C(3) << 16;
+            img[4U + k].csg_op.active_stage_mask = 1ULL;
+        }
+
+        /* Block 0: Seal Superblock Header */
+        img[0].header.magic = FLOW_IMAGE64_MAGIC;
+        img[0].header.block_cap_mask = 7ULL;
+        img[0].header.abi_block_off = 1U;
+        img[0].header.abi_block_count = 1U;
+        img[0].header.unit_block_off = 2U;
+        img[0].header.unit_cell_count = 8U;
+        img[0].header.prefab_block_off = 4U;
+        img[0].header.prefab_block_count = 4U;
+        img[0].header.sieve_flags = (uint32_t)UNIT_SIEVE_ALL_SOUND;
+        img[0].header.version = FLOW_IMAGE64_VERSION;
+        img[0].header.schema_hash = schema_hash;
+        img[0].header.merkle_mac = flow_image64_compute_mac(img, 8U);
+
+        if (emit_image) {
+            FILE *imf = fopen(emit_image, "wb");
+            if (!imf || fwrite(img, sizeof(FlowImageBlock64), 8U, imf) != 8U) {
+                if (imf) fclose(imf);
+                fprintf(stderr, "Error: failed to write 512B .flow image to %s\n", emit_image);
+                return 1;
+            }
+            fclose(imf);
+        }
+
+        if (verify_image) {
+            size_t mapped_len = 0U;
+            const FlowImageBlock64 *mapped = flow_image64_mmap_readonly(verify_image, &mapped_len);
+            if (!mapped || mapped_len != sizeof(img) || memcmp(mapped, img, sizeof(img)) != 0) {
+                if (mapped) flow_image64_munmap(mapped, mapped_len);
+                fprintf(stderr, "Error: .flow image %s failed zero-copy mmap verification!\n", verify_image);
+                return 1;
+            }
+            flow_image64_munmap(mapped, mapped_len);
+        }
+    }
+#endif
 
     if (json_mode) {
         flowy_json_start();
