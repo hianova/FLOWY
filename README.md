@@ -30,7 +30,7 @@ In the `FLOW` architecture (as implemented across [`bloom`](../bloom) and [`flow
 | Subcommand | Role | Key Options |
 | :--- | :--- | :--- |
 | **`flowy slice`** | **64B Cache-Line Univalence, LLVM IR, MCA & Metal AIR Auditor** | `--audit-all`, `--audit-struct <name>`, `--llvm-ir`, `--llvm-ast`, `--mca`, `--metal-air`, `--git-diff` |
-| **`flowy lean`** | **Lean 4 Proof Verifier, Coverage Auditor & 64B FLOW ABI Bridge** | `--verify-all <files...>`, `--from-lean <file.lean>`, `--verify`, `--emit-abi <out.bin>`, `--verify-abi <in.bin>` |
+| **`flowy lean`** | **Lean 4 Proof Verifier, Coverage Auditor, 64B FLOW ABI & `.flow` Image Bridge** | `--verify-all <files...>`, `--from-lean <file.lean>`, `--verify`, `--emit-abi <out.bin>`, `--verify-abi <in.bin>`, `--emit-image <out.flow>`, `--verify-image <in.flow>` |
 | **`flowy diff`** | **5-Mode Algebraic Wind Tunnel, Zero-Fault Bench & 64B Corpus Replay** | `--mode <arith\|tunnel\|chatter\|conservation\|relativistic>`, `--bench`, `--auto-cegis`, `--emit-corpus <bin>`, `--corpus <bin>` |
 | **`flowy qpoly`** | **Conservative Inner Polytope Quantizer & Hysteresis Calculator** | `--dim <1..4>`, `--threshold <T>`, `--deadband <D>`, `--b-enter <E>`, `--b-exit <X>`, `--qshift-sweep`, `--auto-cegis` |
 | **`flowy sieve`** | **Fused 4-Mode (ASM+Jet2+HoTT/QPoly+QSBR) Sieve & Pullback Decoder** | `--fuse [q16]`, `--decode-tag <hex>`, `--decode-sieve <mask>`, `--homotopy <p> <q>`, `--quotient <m,e>`, `--wave64 <mask>`, `--check-qsbr`, `--capsule-encode`, `--capsule-decode`, `--verify-trace` |
@@ -57,9 +57,9 @@ flowy slice src/shader_bloom_sdf.metal --metal-air
 # 4. Verify all Lean 4 formal proofs in parallel (comment-aware 0 sorryAx + transitive def coverage + 64B ABI check)
 flowy lean --verify-all lean/*.lean
 
-# 5. Emit & verify a 64-byte FlowLeanAbiDesc64 binary descriptor from a Lean 4 specification
-flowy lean --from-lean lean/FlowAgentContract.lean --emit-abi build/contract_abi.bin --verify
-flowy lean --from-lean lean/FlowAgentContract.lean --verify-abi build/contract_abi.bin
+# 5. Emit & verify a 64-byte FlowLeanAbiDesc64 binary descriptor and unified 512B .flow image from a Lean 4 specification
+flowy lean --from-lean lean/FlowAgentContract.lean --emit-abi build/contract_abi.bin --emit-image build/contract.flow --verify
+flowy lean --from-lean lean/FlowAgentContract.lean --verify-abi build/contract_abi.bin --verify-image build/contract.flow
 ```
 
 ---
